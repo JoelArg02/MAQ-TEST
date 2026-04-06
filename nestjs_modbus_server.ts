@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Body, Controller, Get, HttpException, HttpStatus, Module, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpException, HttpStatus, Module, Param, Post } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import ModbusRTU from 'modbus-serial';
 
@@ -25,6 +25,7 @@ const IP_PLC = process.env.PLC_IP ?? '192.168.100.64';
 const PLC_PORT = Number(process.env.PLC_PORT ?? 502);
 const PLC_SLAVE_ID = Number(process.env.PLC_SLAVE_ID ?? 1);
 const PLC_TIMEOUT_MS = Number(process.env.PLC_TIMEOUT_MS ?? 3000);
+const HTTP_PORT = Number(process.env.PORT ?? 5434);
 
 const LECTURAS: ReadItem[] = [
   { address: 1000, name: 'Pulsos Telar 1', type: 'int32' },
@@ -311,8 +312,313 @@ class ModbusController {
   }
 }
 
+@Controller()
+class WebController {
+  @Get()
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  index() {
+    return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Panel Modbus SACOS</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #1e293b;
+      --muted: #64748b;
+      --accent: #0f766e;
+      --accent-2: #0ea5e9;
+      --danger: #dc2626;
+      --ok: #15803d;
+      --ring: #99f6e4;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 400px at 10% -10%, #ccfbf1 0%, transparent 60%),
+        radial-gradient(1000px 400px at 90% 0%, #e0f2fe 0%, transparent 60%),
+        var(--bg);
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+    .head {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: white;
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 10px 25px rgba(2, 132, 199, 0.18);
+    }
+    .head h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      letter-spacing: 0.3px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      color: #0f172a;
+    }
+    .line {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    input, select, button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.95rem;
+      outline: none;
+      min-height: 38px;
+    }
+    input:focus, select:focus {
+      border-color: #14b8a6;
+      box-shadow: 0 0 0 3px var(--ring);
+    }
+    button {
+      background: #0f766e;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.alt { background: #0369a1; }
+    button.warn { background: var(--danger); }
+    .muted { color: var(--muted); font-size: 0.88rem; }
+    .status {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      background: #ecfeff;
+      border: 1px solid #99f6e4;
+    }
+    .ok { color: var(--ok); }
+    .err { color: var(--danger); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 0.9rem;
+    }
+    th { background: #f8fafc; color: #334155; }
+    .chip {
+      display: inline-block;
+      font-size: 0.78rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #ecfeff;
+      border: 1px solid #a5f3fc;
+      color: #0e7490;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <h1>Panel Modbus SACOS <span class="chip">NestJS + Modbus TCP</span></h1>
+      <div class="muted" style="color:#dbeafe;margin-top:6px;">Lectura, escritura y reset desde una sola pantalla</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Lecturas Generales</h2>
+        <div class="line">
+          <button id="btnRefresh" class="alt">Refrescar ahora</button>
+          <label><input type="checkbox" id="auto" checked /> Auto cada 2s</label>
+        </div>
+        <div id="plcInfo" class="muted">Sin datos</div>
+        <div id="statusRead" class="status">Esperando lectura...</div>
+      </div>
+
+      <div class="card">
+        <h2>Escribir Perimetro</h2>
+        <div class="line">
+          <select id="perId">
+            <option value="1">1 - Rodillo 1</option>
+            <option value="2">2 - Rodillo 2</option>
+            <option value="3">3 - Rodillo 3</option>
+          </select>
+          <input id="perVal" type="number" step="0.01" placeholder="0.51" />
+          <button id="btnPer">Guardar</button>
+        </div>
+        <div id="statusPer" class="status">Sin cambios</div>
+      </div>
+
+      <div class="card">
+        <h2>Escribir Pulsos</h2>
+        <div class="line">
+          <select id="pulId">
+            <option value="1">1 - Telar 1</option>
+            <option value="2">2 - Telar 2</option>
+            <option value="3">3 - Telar 3</option>
+            <option value="4">4 - Cortadora 1</option>
+            <option value="5">5 - Cortadora 2</option>
+            <option value="6">6 - Cortadora 3</option>
+            <option value="7">7 - Cortadora 4</option>
+          </select>
+          <input id="pulVal" type="number" step="1" min="0" placeholder="12345" />
+          <button id="btnPul">Guardar</button>
+        </div>
+        <div id="statusPul" class="status">Sin cambios</div>
+      </div>
+
+      <div class="card">
+        <h2>Reset Memoria M</h2>
+        <div class="line">
+          <select id="mem">
+            <option>m0</option><option>m1</option><option>m2</option><option>m3</option>
+            <option>m4</option><option>m5</option><option>m6</option>
+          </select>
+          <button id="btnReset" class="warn">Pulso Reset</button>
+        </div>
+        <div id="statusReset" class="status">Sin cambios</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <h2>Tabla de Variables</h2>
+      <table>
+        <thead>
+          <tr><th>Descripcion</th><th>Registro</th><th>Tipo</th><th>Valor</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const rows = document.getElementById('rows');
+    const plcInfo = document.getElementById('plcInfo');
+    const statusRead = document.getElementById('statusRead');
+    let timer = null;
+
+    function setStatus(el, text, ok = true) {
+      el.textContent = text;
+      el.className = 'status ' + (ok ? 'ok' : 'err');
+    }
+
+    async function readAll() {
+      try {
+        const res = await fetch('/api/lecturas');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Error de lectura');
+
+        plcInfo.textContent = 'PLC ' + data.plc.ip + ':' + data.plc.port + ' | Slave ' + data.plc.slaveId + ' | ' + new Date(data.timestamp).toLocaleTimeString();
+        rows.innerHTML = data.values.map(v =>
+          '<tr><td>' + v.name + '</td><td>D' + v.address + '</td><td>' + v.type + '</td><td>' + v.value + '</td></tr>'
+        ).join('');
+        setStatus(statusRead, 'Lectura correcta');
+      } catch (err) {
+        setStatus(statusRead, 'Fallo lectura: ' + err.message, false);
+      }
+    }
+
+    document.getElementById('btnRefresh').onclick = readAll;
+    document.getElementById('auto').onchange = (e) => {
+      if (e.target.checked) {
+        timer = setInterval(readAll, 2000);
+        readAll();
+      } else {
+        clearInterval(timer);
+      }
+    };
+
+    document.getElementById('btnPer').onclick = async () => {
+      const id = document.getElementById('perId').value;
+      const value = Number(document.getElementById('perVal').value);
+      const el = document.getElementById('statusPer');
+      try {
+        const res = await fetch('/api/perimetros/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Error');
+        setStatus(el, 'OK ' + data.name + ' = ' + data.value);
+        readAll();
+      } catch (err) {
+        setStatus(el, 'Error: ' + err.message, false);
+      }
+    };
+
+    document.getElementById('btnPul').onclick = async () => {
+      const id = document.getElementById('pulId').value;
+      const value = Number(document.getElementById('pulVal').value);
+      const el = document.getElementById('statusPul');
+      try {
+        const res = await fetch('/api/pulsos/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Error');
+        setStatus(el, 'OK ' + data.name + ' = ' + data.value);
+        readAll();
+      } catch (err) {
+        setStatus(el, 'Error: ' + err.message, false);
+      }
+    };
+
+    document.getElementById('btnReset').onclick = async () => {
+      const mem = document.getElementById('mem').value;
+      const el = document.getElementById('statusReset');
+      try {
+        const res = await fetch('/api/reset/' + mem, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Error');
+        setStatus(el, 'Reset aplicado a ' + data.memory + ' (' + data.pulseMs + ' ms)');
+      } catch (err) {
+        setStatus(el, 'Error: ' + err.message, false);
+      }
+    };
+
+    timer = setInterval(readAll, 2000);
+    readAll();
+  </script>
+</body>
+</html>`;
+  }
+}
+
 @Module({
-  controllers: [ModbusController],
+  controllers: [ModbusController, WebController],
   providers: [ModbusService],
 })
 class AppModule {}
@@ -338,8 +644,8 @@ async function bootstrap() {
     process.exit(0);
   });
 
-  await app.listen(Number(process.env.PORT ?? 3000));
-  console.log(`NestJS Modbus server arriba en http://localhost:${process.env.PORT ?? 3000}`);
+  await app.listen(HTTP_PORT);
+  console.log(`NestJS Modbus server arriba en http://localhost:${HTTP_PORT}`);
 }
 
 bootstrap().catch((error) => {
