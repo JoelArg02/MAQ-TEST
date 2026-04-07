@@ -155,7 +155,8 @@ export class StorageService implements OnModuleInit {
         name TEXT NOT NULL,
         type TEXT NOT NULL,
         value_text TEXT,
-        value_num REAL
+        value_num REAL,
+        synced INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_readings_epoch ON readings(epoch_seconds);
@@ -187,10 +188,54 @@ export class StorageService implements OnModuleInit {
       CREATE INDEX IF NOT EXISTS idx_anomalies_epoch ON anomalies(epoch_seconds);
       CREATE INDEX IF NOT EXISTS idx_anomalies_addr ON anomalies(address, epoch_seconds);
     `);
+
+        await this.db.exec(`CREATE INDEX IF NOT EXISTS idx_readings_synced ON readings(synced) WHERE synced = 0`);
+
+        const cols = await this.db.all(`PRAGMA table_info(readings)`);
+        const hasSynced = cols.some((c: { name: string }) => c.name === 'synced');
+        if (!hasSynced) {
+          await this.db.exec(`ALTER TABLE readings ADD COLUMN synced INTEGER NOT NULL DEFAULT 0`);
+          await this.db.exec(`CREATE INDEX IF NOT EXISTS idx_readings_synced ON readings(synced) WHERE synced = 0`);
+        }
       })();
     }
 
     await this.initPromise;
+  }
+
+  async getUnsyncedReadings(limit: number) {
+    await this.ensureReady();
+    return this.db.all(
+      `SELECT id, epoch_seconds, address, name, type, value_text, value_num
+       FROM readings WHERE synced = 0 ORDER BY id ASC LIMIT ?`,
+      limit,
+    );
+  }
+
+  async markReadingsSynced(ids: number[]): Promise<void> {
+    await this.ensureReady();
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    await this.db.run(`UPDATE readings SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  }
+
+  async getUnsyncedEvents(limit: number) {
+    await this.ensureReady();
+    return this.db.all(
+      `SELECT id, epoch_seconds, event_type, details
+       FROM events ORDER BY id ASC LIMIT ?`,
+      limit,
+    );
+  }
+
+  async getUnsyncedAnomalies(limit: number) {
+    await this.ensureReady();
+    return this.db.all(
+      `SELECT id, epoch_seconds, address, machine, anomaly_type, severity,
+              speed_observed, speed_ewma, z_score, sigma_mad, details
+       FROM anomalies ORDER BY id ASC LIMIT ?`,
+      limit,
+    );
   }
 
   async clearAllData(): Promise<{ deleted: { readings: number; events: number; anomalies: number } }> {
