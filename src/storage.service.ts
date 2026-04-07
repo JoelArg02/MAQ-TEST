@@ -2,7 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Database, open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { DB_FILE } from './config';
-import { PULSE_ADDRESSES } from './modbus-map';
+import { PULSOS, PULSE_ADDRESSES } from './modbus-map';
 import { SnapshotValue } from './modbus.service';
 
 type PulsePoint = {
@@ -17,6 +17,15 @@ type IntervalPoint = {
   dt: number;
   delta: number;
   speed: number;
+};
+
+type HourMachineAgg = {
+  hour: string;
+  weightedSpeed: number;
+  seconds: number;
+  stoppedSeconds: number;
+  resetSeconds: number;
+  productionDelta: number;
 };
 
 @Injectable()
@@ -479,6 +488,233 @@ export class StorageService implements OnModuleInit {
       },
       hourly,
       events,
+    };
+  }
+
+  async analyzeDayMachineTable(dayInput?: string) {
+    await this.ensureReady();
+
+    const baseDate = dayInput ? new Date(`${dayInput}T00:00:00`) : new Date();
+    if (Number.isNaN(baseDate.getTime())) {
+      throw new Error(`Fecha invalida: ${dayInput}`);
+    }
+
+    const dayStart = new Date(baseDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const fromEpoch = Math.floor(dayStart.getTime() / 1000);
+    const toEpoch = Math.floor(dayEnd.getTime() / 1000);
+
+    const placeholders = PULSE_ADDRESSES.map(() => '?').join(',');
+    const rows = (await this.db.all(
+      `SELECT epoch_seconds, address, value_num
+       FROM readings
+       WHERE epoch_seconds BETWEEN ? AND ?
+         AND address IN (${placeholders})
+         AND value_num IS NOT NULL
+       ORDER BY address ASC, epoch_seconds ASC`,
+      fromEpoch,
+      toEpoch,
+      ...PULSE_ADDRESSES,
+    )) as PulsePoint[];
+
+    if (rows.length === 0) {
+      return {
+        day: dayStart.toISOString().slice(0, 10),
+        fromEpoch,
+        toEpoch,
+        noData: true,
+        metric: {
+          baselineWindowHours: 3,
+          lowSpeedThresholdPct: -25,
+          upSpeedThresholdPct: 25,
+        },
+        rows: [],
+      };
+    }
+
+    const machineDefs = Object.values(PULSOS).map((m) => {
+      const isTelar = m.name.toLowerCase().includes('telar');
+      return {
+        address: m.address,
+        machine: m.name,
+        kind: isTelar ? ('TELAR' as const) : ('CORTADORA' as const),
+        unit: isTelar ? ('metros' as const) : ('costales' as const),
+      };
+    });
+
+    const byAddress = new Map<number, PulsePoint[]>();
+    for (const row of rows) {
+      const list = byAddress.get(row.address) ?? [];
+      list.push(row);
+      byAddress.set(row.address, list);
+    }
+
+    const toHourKey = (epoch: number) => {
+      const d = new Date(epoch * 1000);
+      return `${String(d.getHours()).padStart(2, '0')}:00`;
+    };
+
+    const allRows: Array<{
+      hour: string;
+      machine: string;
+      machineType: 'TELAR' | 'CORTADORA';
+      unit: 'metros' | 'costales';
+      avgSpeed: number;
+      productionInHour: number;
+      stoppedSeconds: number;
+      resetSeconds: number;
+      baselineAvgSpeed: number | null;
+      changeVsBaselinePct: number | null;
+      changeVsPrevHourPct: number | null;
+      trend: 'PARO' | 'BAJO_VELOCIDAD' | 'SUBIO_VELOCIDAD' | 'ESTABLE' | 'SIN_REFERENCIA';
+      insight: string;
+    }> = [];
+
+    for (const machine of machineDefs) {
+      const points = byAddress.get(machine.address) ?? [];
+      if (points.length < 2) {
+        continue;
+      }
+
+      const byHour = new Map<string, HourMachineAgg>();
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1];
+        const curr = points[i];
+        const dt = Math.max(1, curr.epoch_seconds - prev.epoch_seconds);
+        const rawDelta = curr.value_num - prev.value_num;
+        const delta = rawDelta < 0 ? 0 : rawDelta;
+        const speed = delta / dt;
+
+        const hour = toHourKey(prev.epoch_seconds);
+        const agg = byHour.get(hour) ?? {
+          hour,
+          weightedSpeed: 0,
+          seconds: 0,
+          stoppedSeconds: 0,
+          resetSeconds: 0,
+          productionDelta: 0,
+        };
+
+        agg.weightedSpeed += speed * dt;
+        agg.seconds += dt;
+        agg.productionDelta += delta;
+
+        if (rawDelta < 0) {
+          agg.resetSeconds += dt;
+        } else if (delta <= 0) {
+          agg.stoppedSeconds += dt;
+        }
+
+        byHour.set(hour, agg);
+      }
+
+      const hourly = [...byHour.values()].sort((a, b) => a.hour.localeCompare(b.hour));
+
+      for (let i = 0; i < hourly.length; i++) {
+        const current = hourly[i];
+        const avgSpeed = current.seconds > 0 ? current.weightedSpeed / current.seconds : 0;
+
+        const prevHours = hourly.slice(Math.max(0, i - 3), i);
+        const baselineCandidates = prevHours
+          .map((x) => (x.seconds > 0 ? x.weightedSpeed / x.seconds : 0))
+          .filter((x) => x > 0);
+
+        const baselineAvgSpeed =
+          baselineCandidates.length > 0
+            ? baselineCandidates.reduce((sum, x) => sum + x, 0) / baselineCandidates.length
+            : null;
+
+        const prevHourAvg =
+          i > 0 && hourly[i - 1].seconds > 0
+            ? hourly[i - 1].weightedSpeed / hourly[i - 1].seconds
+            : null;
+
+        const changeVsBaselinePct =
+          baselineAvgSpeed && baselineAvgSpeed > 0
+            ? ((avgSpeed - baselineAvgSpeed) / baselineAvgSpeed) * 100
+            : null;
+
+        const changeVsPrevHourPct =
+          prevHourAvg && prevHourAvg > 0
+            ? ((avgSpeed - prevHourAvg) / prevHourAvg) * 100
+            : null;
+
+        let trend: 'PARO' | 'BAJO_VELOCIDAD' | 'SUBIO_VELOCIDAD' | 'ESTABLE' | 'SIN_REFERENCIA' =
+          'SIN_REFERENCIA';
+
+        if (current.seconds > 0 && current.stoppedSeconds / current.seconds >= 0.8) {
+          trend = 'PARO';
+        } else if (changeVsBaselinePct === null) {
+          trend = 'SIN_REFERENCIA';
+        } else if (changeVsBaselinePct <= -25) {
+          trend = 'BAJO_VELOCIDAD';
+        } else if (changeVsBaselinePct >= 25) {
+          trend = 'SUBIO_VELOCIDAD';
+        } else {
+          trend = 'ESTABLE';
+        }
+
+        const insight =
+          trend === 'PARO'
+            ? `Paro dominante (${current.stoppedSeconds}s detenida en la hora).`
+            : trend === 'BAJO_VELOCIDAD'
+              ? `Bajo velocidad ${Number(changeVsBaselinePct!.toFixed(1))}% vs baseline de horas previas.`
+              : trend === 'SUBIO_VELOCIDAD'
+                ? `Subio velocidad ${Number(changeVsBaselinePct!.toFixed(1))}% vs baseline de horas previas.`
+                : trend === 'ESTABLE'
+                  ? 'Comportamiento estable respecto a horas previas.'
+                  : 'Sin historial suficiente para comparar.';
+
+        allRows.push({
+          hour: current.hour,
+          machine: machine.machine,
+          machineType: machine.kind,
+          unit: machine.unit,
+          avgSpeed: Number(avgSpeed.toFixed(3)),
+          productionInHour: Number(current.productionDelta.toFixed(3)),
+          stoppedSeconds: current.stoppedSeconds,
+          resetSeconds: current.resetSeconds,
+          baselineAvgSpeed:
+            baselineAvgSpeed === null ? null : Number(baselineAvgSpeed.toFixed(3)),
+          changeVsBaselinePct:
+            changeVsBaselinePct === null ? null : Number(changeVsBaselinePct.toFixed(1)),
+          changeVsPrevHourPct:
+            changeVsPrevHourPct === null ? null : Number(changeVsPrevHourPct.toFixed(1)),
+          trend,
+          insight,
+        });
+      }
+    }
+
+    allRows.sort((a, b) => {
+      const byHour = a.hour.localeCompare(b.hour);
+      if (byHour !== 0) {
+        return byHour;
+      }
+      return a.machine.localeCompare(b.machine);
+    });
+
+    return {
+      day: dayStart.toISOString().slice(0, 10),
+      fromEpoch,
+      toEpoch,
+      noData: allRows.length === 0,
+      metric: {
+        baselineWindowHours: 3,
+        lowSpeedThresholdPct: -25,
+        upSpeedThresholdPct: 25,
+      },
+      columns: [
+        'hour',
+        'machine',
+        'avgSpeed',
+        'stoppedSeconds',
+        'trend',
+      ],
+      rows: allRows,
     };
   }
 }

@@ -180,4 +180,16 @@ export class ModbusController {
       );
     }
   }
+
+  @Get('analysis-day-table')
+  async analysisDayTable(@Query('day') day?: string) {
+    try {
+      return await this.storage.analyzeDayMachineTable(day);
+    } catch (error) {
+      throw new HttpException(
+        `No se pudo generar la tabla diaria: ${(error as Error).message}`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
 }
