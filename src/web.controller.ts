@@ -105,6 +105,10 @@ async function loadAnalysis() {
   }
 }
 
+async function refreshAll() {
+  await Promise.all([loadLive(), loadAnalysis()]);
+}
+
 async function resetMachine(id) {
   try {
     const data = await fetchJson('/api/pulsos/' + id + '/reset', { method: 'POST' });
@@ -120,7 +124,7 @@ window.addEventListener('error', (event) => {
   setText(statusLive, 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ')', false);
 });
 
-document.getElementById('btnRefresh').onclick = loadLive;
+document.getElementById('btnRefresh').onclick = refreshAll;
 document.getElementById('btnAnalyze').onclick = loadAnalysis;
 
 document.querySelectorAll('[data-reset-id]').forEach((btn) => {
@@ -129,8 +133,8 @@ document.querySelectorAll('[data-reset-id]').forEach((btn) => {
 
 document.getElementById('auto').onchange = (e) => {
   if (e.target.checked) {
-    timer = setInterval(loadLive, 4000);
-    loadLive();
+    timer = setInterval(refreshAll, 1000);
+    refreshAll();
   } else if (timer) {
     clearInterval(timer);
     timer = null;
@@ -140,9 +144,8 @@ document.getElementById('auto').onchange = (e) => {
 const now = new Date();
 dayInput.value = now.toISOString().slice(0, 10);
 
-loadLive();
-loadAnalysis();
-timer = setInterval(loadLive, 4000);
+refreshAll();
+timer = setInterval(refreshAll, 1000);
 `;
   }
 
@@ -185,7 +188,7 @@ timer = setInterval(loadLive, 4000);
       <h2>Controles</h2>
       <div class="line">
         <button id="btnRefresh" class="gray">Refrescar lectura</button>
-        <label><input id="auto" type="checkbox" checked /> Auto 4s</label>
+        <label><input id="auto" type="checkbox" checked /> Auto 1s</label>
       </div>
       <div id="statusLive" class="status">Esperando lectura...</div>
     </div>
