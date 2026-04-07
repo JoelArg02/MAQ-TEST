@@ -2,6 +2,150 @@ import { Controller, Get, Header } from '@nestjs/common';
 
 @Controller()
 export class WebController {
+  @Get('app.js')
+  @Header('Content-Type', 'application/javascript; charset=utf-8')
+  appScript() {
+    return `window.addEventListener('error', (event) => {
+  const msg = 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ':' + event.colno + ')';
+  console.error(msg);
+  const plcInfoEl = document.getElementById('plcInfo');
+  if (plcInfoEl) {
+    plcInfoEl.textContent = msg;
+  }
+});
+
+const rows = document.getElementById('rows');
+const plcInfo = document.getElementById('plcInfo');
+let timer = null;
+
+function setStatus(id, text, ok = true) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'status ' + (ok ? 'ok' : 'err');
+}
+
+async function readAll() {
+  try {
+    const res = await fetch('/api/lecturas');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'Error');
+
+    plcInfo.textContent = 'PLC ' + data.plc.ip + ':' + data.plc.port + ' | ' + new Date(data.timestamp).toLocaleString();
+    rows.innerHTML = data.values.map(v =>
+      '<tr><td>' + v.name + '</td><td>D' + v.address + '</td><td>' + v.type + '</td><td>' + v.value + '</td></tr>'
+    ).join('');
+  } catch (err) {
+    setStatus('plcInfo', 'Fallo lectura: ' + err.message, false);
+  }
+}
+
+document.getElementById('btnRefresh').onclick = readAll;
+document.getElementById('auto').onchange = (e) => {
+  if (e.target.checked) {
+    timer = setInterval(readAll, 2000);
+    readAll();
+  } else {
+    clearInterval(timer);
+  }
+};
+
+document.getElementById('btnResetStart').onclick = async () => {
+  try {
+    const res = await fetch('/api/pulsos/reset-all-start', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'Error');
+    setStatus('statusResetStart', data.message, true);
+    readAll();
+  } catch (err) {
+    setStatus('statusResetStart', 'Error: ' + err.message, false);
+  }
+};
+
+document.getElementById('btnPer').onclick = async () => {
+  const id = document.getElementById('perId').value;
+  const value = Number(document.getElementById('perVal').value);
+  try {
+    const res = await fetch('/api/perimetros/' + id, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'Error');
+    setStatus('statusPer', 'OK ' + data.name + ' = ' + data.value, true);
+    readAll();
+  } catch (err) {
+    setStatus('statusPer', 'Error: ' + err.message, false);
+  }
+};
+
+document.getElementById('btnPul').onclick = async () => {
+  const id = document.getElementById('pulId').value;
+  const value = Number(document.getElementById('pulVal').value);
+  try {
+    const res = await fetch('/api/pulsos/' + id, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'Error');
+    setStatus('statusPul', 'OK ' + data.name + ' = ' + data.value, true);
+    readAll();
+  } catch (err) {
+    setStatus('statusPul', 'Error: ' + err.message, false);
+  }
+};
+
+document.getElementById('btnAnalysis').onclick = async () => {
+  const day = document.getElementById('day').value;
+  const q = new URLSearchParams();
+  if (day) q.set('day', day);
+
+  try {
+    const res = await fetch('/api/analysis-day?' + q.toString());
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'Error');
+
+    if (data.noData) {
+      setStatus('statusAnalysis', 'No hay datos', true);
+      return;
+    }
+
+    const hourlyLines = data.hourly.length > 0
+      ? data.hourly.map(h => h.hour + ' -> prom=' + h.avgSpeed + ', paro=' + h.stoppedSeconds + 's, baja=' + h.lowSpeedSeconds + 's')
+      : ['No hay datos'];
+
+    const eventLines = data.events.length > 0
+      ? data.events.map(e => e.approxTime + ' [' + e.type + '] ' + e.detail)
+      : ['No hay eventos detectados'];
+
+    const text = [
+      'Dia: ' + data.day,
+      'Velocidad promedio del dia: ' + data.summary.avgSpeed,
+      'Paro total (s): ' + data.summary.stoppedSeconds,
+      'Baja velocidad total (s): ' + data.summary.lowSpeedSeconds,
+      '',
+      'Promedio por hora:',
+      ...hourlyLines,
+      '',
+      'Eventos aproximados:',
+      ...eventLines,
+    ].join('\\n');
+    setStatus('statusAnalysis', text, true);
+  } catch (err) {
+    setStatus('statusAnalysis', 'Error: ' + err.message, false);
+  }
+};
+
+const now = new Date();
+document.getElementById('day').value = now.toISOString().slice(0, 10);
+
+timer = setInterval(readAll, 2000);
+readAll();
+`;
+  }
+
   @Get()
   @Header('Content-Type', 'text/html; charset=utf-8')
   index() {
@@ -156,137 +300,7 @@ export class WebController {
     </div>
   </div>
 
-  <script>
-    const rows = document.getElementById('rows');
-    const plcInfo = document.getElementById('plcInfo');
-    let timer = null;
-
-    function setStatus(id, text, ok = true) {
-      const el = document.getElementById(id);
-      el.textContent = text;
-      el.className = 'status ' + (ok ? 'ok' : 'err');
-    }
-
-    async function readAll() {
-      try {
-        const res = await fetch('/api/lecturas');
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Error');
-
-        plcInfo.textContent = 'PLC ' + data.plc.ip + ':' + data.plc.port + ' | ' + new Date(data.timestamp).toLocaleString();
-        rows.innerHTML = data.values.map(v =>
-          '<tr><td>' + v.name + '</td><td>D' + v.address + '</td><td>' + v.type + '</td><td>' + v.value + '</td></tr>'
-        ).join('');
-      } catch (err) {
-        setStatus('plcInfo', 'Fallo lectura: ' + err.message, false);
-      }
-    }
-
-    document.getElementById('btnRefresh').onclick = readAll;
-    document.getElementById('auto').onchange = (e) => {
-      if (e.target.checked) {
-        timer = setInterval(readAll, 2000);
-        readAll();
-      } else {
-        clearInterval(timer);
-      }
-    };
-
-    document.getElementById('btnResetStart').onclick = async () => {
-      try {
-        const res = await fetch('/api/pulsos/reset-all-start', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Error');
-        setStatus('statusResetStart', data.message, true);
-        readAll();
-      } catch (err) {
-        setStatus('statusResetStart', 'Error: ' + err.message, false);
-      }
-    };
-
-    document.getElementById('btnPer').onclick = async () => {
-      const id = document.getElementById('perId').value;
-      const value = Number(document.getElementById('perVal').value);
-      try {
-        const res = await fetch('/api/perimetros/' + id, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Error');
-        setStatus('statusPer', 'OK ' + data.name + ' = ' + data.value, true);
-        readAll();
-      } catch (err) {
-        setStatus('statusPer', 'Error: ' + err.message, false);
-      }
-    };
-
-    document.getElementById('btnPul').onclick = async () => {
-      const id = document.getElementById('pulId').value;
-      const value = Number(document.getElementById('pulVal').value);
-      try {
-        const res = await fetch('/api/pulsos/' + id, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Error');
-        setStatus('statusPul', 'OK ' + data.name + ' = ' + data.value, true);
-        readAll();
-      } catch (err) {
-        setStatus('statusPul', 'Error: ' + err.message, false);
-      }
-    };
-
-    document.getElementById('btnAnalysis').onclick = async () => {
-      const day = document.getElementById('day').value;
-      const q = new URLSearchParams();
-      if (day) q.set('day', day);
-
-      try {
-        const res = await fetch('/api/analysis-day?' + q.toString());
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Error');
-
-        if (data.noData) {
-          setStatus('statusAnalysis', 'No hay datos', true);
-          return;
-        }
-
-        const hourlyLines = data.hourly.length > 0
-          ? data.hourly.map(h => h.hour + ' -> prom=' + h.avgSpeed + ', paro=' + h.stoppedSeconds + 's, baja=' + h.lowSpeedSeconds + 's')
-          : ['No hay datos'];
-
-        const eventLines = data.events.length > 0
-          ? data.events.map(e => e.approxTime + ' [' + e.type + '] ' + e.detail)
-          : ['No hay eventos detectados'];
-
-        const text = [
-          'Dia: ' + data.day,
-          'Velocidad promedio del dia: ' + data.summary.avgSpeed,
-          'Paro total (s): ' + data.summary.stoppedSeconds,
-          'Baja velocidad total (s): ' + data.summary.lowSpeedSeconds,
-          '',
-          'Promedio por hora:',
-          ...hourlyLines,
-          '',
-          'Eventos aproximados:',
-          ...eventLines,
-        ].join('\n');
-        setStatus('statusAnalysis', text, true);
-      } catch (err) {
-        setStatus('statusAnalysis', 'Error: ' + err.message, false);
-      }
-    };
-
-    const now = new Date();
-    document.getElementById('day').value = now.toISOString().slice(0, 10);
-
-    timer = setInterval(readAll, 2000);
-    readAll();
-  </script>
+  <script src="/app.js"></script>
 </body>
 </html>`;
   }
