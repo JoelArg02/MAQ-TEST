@@ -119,6 +119,10 @@ export class StorageService implements OnModuleInit {
   private db!: Database;
   private initPromise: Promise<void> | null = null;
 
+  /* --- Caché para analyzeDayMachineTable --- */
+  private analysisCache: { key: string; data: unknown; ts: number } | null = null;
+  private readonly ANALYSIS_CACHE_TTL_MS = 30_000; // 30 segundos
+
   async onModuleInit(): Promise<void> {
     await this.ensureReady();
   }
@@ -134,6 +138,13 @@ export class StorageService implements OnModuleInit {
           filename: DB_FILE,
           driver: sqlite3.Database,
         });
+
+        // --- PRAGMAs de rendimiento ---
+        await this.db.exec(`PRAGMA journal_mode = WAL`);
+        await this.db.exec(`PRAGMA synchronous = NORMAL`);
+        await this.db.exec(`PRAGMA cache_size = -8000`);   // 8 MB de caché
+        await this.db.exec(`PRAGMA temp_store = MEMORY`);
+        await this.db.exec(`PRAGMA mmap_size = 67108864`);  // 64 MB mmap
 
         await this.db.exec(`
       CREATE TABLE IF NOT EXISTS readings (
@@ -184,6 +195,7 @@ export class StorageService implements OnModuleInit {
 
   async clearAllData(): Promise<{ deleted: { readings: number; events: number; anomalies: number } }> {
     await this.ensureReady();
+    this.analysisCache = null; // invalidar caché
     const r = await this.db.run(`DELETE FROM readings`);
     const e = await this.db.run(`DELETE FROM events`);
     const a = await this.db.run(`DELETE FROM anomalies`);
@@ -210,29 +222,23 @@ export class StorageService implements OnModuleInit {
 
   async saveSnapshot(values: SnapshotValue[], tsIso: string, epochSeconds: number): Promise<void> {
     await this.ensureReady();
-    await this.db.exec('BEGIN');
-    try {
-      for (const item of values) {
-        const valueNum = typeof item.value === 'number' ? item.value : null;
-        const valueText = typeof item.value === 'string' ? item.value : null;
+    if (values.length === 0) return;
 
-        await this.db.run(
-          `INSERT INTO readings(ts_iso, epoch_seconds, address, name, type, value_text, value_num)
-           VALUES (?, ?, ?, ?, ?, ?, ?)` ,
-          tsIso,
-          epochSeconds,
-          item.address,
-          item.name,
-          item.type,
-          valueText,
-          valueNum,
-        );
-      }
-      await this.db.exec('COMMIT');
-    } catch (error) {
-      await this.db.exec('ROLLBACK');
-      throw error;
+    // Batch INSERT: una sola sentencia con múltiples filas
+    const placeholders: string[] = [];
+    const params: unknown[] = [];
+    for (const item of values) {
+      const valueNum = typeof item.value === 'number' ? item.value : null;
+      const valueText = typeof item.value === 'string' ? item.value : null;
+      placeholders.push('(?, ?, ?, ?, ?, ?, ?)');
+      params.push(tsIso, epochSeconds, item.address, item.name, item.type, valueText, valueNum);
     }
+
+    await this.db.run(
+      `INSERT INTO readings(ts_iso, epoch_seconds, address, name, type, value_text, value_num)
+       VALUES ${placeholders.join(',')}`,
+      ...params,
+    );
   }
 
   async getReadings(fromEpoch: number, toEpoch: number) {
@@ -612,6 +618,23 @@ export class StorageService implements OnModuleInit {
   async analyzeDayMachineTable(dayInput?: string) {
     await this.ensureReady();
 
+    // --- Caché con TTL de 30s ---
+    const cacheKey = dayInput || new Date().toISOString().slice(0, 10);
+    const now = Date.now();
+    if (
+      this.analysisCache &&
+      this.analysisCache.key === cacheKey &&
+      now - this.analysisCache.ts < this.ANALYSIS_CACHE_TTL_MS
+    ) {
+      return this.analysisCache.data;
+    }
+
+    const result = await this._computeAnalysisDayMachineTable(dayInput);
+    this.analysisCache = { key: cacheKey, data: result, ts: now };
+    return result;
+  }
+
+  private async _computeAnalysisDayMachineTable(dayInput?: string) {
     const baseDate = dayInput ? new Date(`${dayInput}T00:00:00`) : new Date();
     if (Number.isNaN(baseDate.getTime())) {
       throw new Error(`Fecha invalida: ${dayInput}`);
@@ -976,30 +999,9 @@ export class StorageService implements OnModuleInit {
       return a.machine.localeCompare(b.machine);
     });
 
-    // Persistir anomalías silenciosamente (no se muestran en UI, solo referencia futura)
+    // Persistir anomalías en background (fire-and-forget, no bloquea respuesta)
     if (pendingAnomalies.length > 0) {
-      try {
-        await this.db.exec('BEGIN');
-        for (const a of pendingAnomalies) {
-          const exists = await this.db.get(
-            `SELECT id FROM anomalies WHERE epoch_seconds = ? AND address = ?`,
-            a.epoch_seconds,
-            a.address,
-          );
-          if (!exists) {
-            await this.db.run(
-              `INSERT INTO anomalies(detected_at, epoch_seconds, address, machine, anomaly_type, severity, speed_observed, speed_ewma, z_score, sigma_mad, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              new Date().toISOString(),
-              a.epoch_seconds, a.address, a.machine, a.anomaly_type, a.severity,
-              a.speed_observed, a.speed_ewma, a.z_score, a.sigma_mad, a.details,
-            );
-          }
-        }
-        await this.db.exec('COMMIT');
-      } catch {
-        await this.db.exec('ROLLBACK');
-      }
+      void this._persistAnomaliesBg(pendingAnomalies);
     }
 
     return {
@@ -1043,5 +1045,48 @@ export class StorageService implements OnModuleInit {
        ORDER BY epoch_seconds DESC`,
       fromEpoch, toEpoch,
     );
+  }
+
+  /** Persiste anomalías en background usando INSERT OR IGNORE para evitar duplicados sin SELECT previo */
+  private async _persistAnomaliesBg(
+    anomalies: Array<{
+      epoch_seconds: number;
+      address: number;
+      machine: string;
+      anomaly_type: string;
+      severity: string;
+      speed_observed: number;
+      speed_ewma: number;
+      z_score: number;
+      sigma_mad: number;
+      details: string;
+    }>,
+  ): Promise<void> {
+    try {
+      // Crear índice único si no existe para INSERT OR IGNORE
+      await this.db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_anomalies_unique ON anomalies(epoch_seconds, address)`,
+      );
+
+      const placeholders: string[] = [];
+      const params: unknown[] = [];
+      const now = new Date().toISOString();
+      for (const a of anomalies) {
+        placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        params.push(
+          now, a.epoch_seconds, a.address, a.machine, a.anomaly_type, a.severity,
+          a.speed_observed, a.speed_ewma, a.z_score, a.sigma_mad, a.details,
+        );
+      }
+
+      // Batch INSERT OR IGNORE — una sola sentencia, sin SELECT previo
+      await this.db.run(
+        `INSERT OR IGNORE INTO anomalies(detected_at, epoch_seconds, address, machine, anomaly_type, severity, speed_observed, speed_ewma, z_score, sigma_mad, details)
+         VALUES ${placeholders.join(',')}`,
+        ...params,
+      );
+    } catch {
+      // Silencioso — anomalías son solo referencia
+    }
   }
 }

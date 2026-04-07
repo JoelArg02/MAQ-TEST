@@ -12,7 +12,11 @@ const statusAnalysis = document.getElementById('statusAnalysis');
 const statusReset = document.getElementById('statusReset');
 const dayInput = document.getElementById('day');
 
-let timer = null;
+let liveTimer = null;
+let analysisTimer = null;
+
+const LIVE_INTERVAL = 2000;      // 2s — datos en vivo
+const ANALYSIS_INTERVAL = 30000; // 30s — análisis por horas (datos no cambian tan rápido)
 
 function setText(el, text, ok = true) {
   el.textContent = text;
@@ -105,16 +109,25 @@ async function loadAnalysis() {
   }
 }
 
-async function refreshAll() {
-  await Promise.all([loadLive(), loadAnalysis()]);
+function startAuto() {
+  stopAuto();
+  loadLive();
+  loadAnalysis();
+  liveTimer = setInterval(loadLive, LIVE_INTERVAL);
+  analysisTimer = setInterval(loadAnalysis, ANALYSIS_INTERVAL);
+}
+
+function stopAuto() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
 }
 
 async function resetMachine(id) {
   try {
     const data = await fetchJson('/api/pulsos/' + id + '/reset', { method: 'POST' });
     setText(statusReset, data.message || 'Reset aplicado', true);
-    await loadLive();
-    await loadAnalysis();
+    loadLive();
+    loadAnalysis();
   } catch (err) {
     setText(statusReset, 'Error reset: ' + err.message, false);
   }
@@ -135,7 +148,7 @@ async function fullReset() {
     setText(statusReset, data.message || 'Reset completo exitoso', true);
     analysisRows.innerHTML = '';
     setText(statusAnalysis, 'DB limpia, esperando nuevos datos...', true);
-    await loadLive();
+    loadLive();
   } catch (err) {
     setText(statusReset, 'Error reset completo: ' + err.message, false);
   }
@@ -145,7 +158,7 @@ window.addEventListener('error', (event) => {
   setText(statusLive, 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ')', false);
 });
 
-document.getElementById('btnRefresh').onclick = refreshAll;
+document.getElementById('btnRefresh').onclick = () => { loadLive(); loadAnalysis(); };
 document.getElementById('btnAnalyze').onclick = loadAnalysis;
 document.getElementById('btnFullReset').onclick = showModal;
 document.getElementById('modalCancel').onclick = hideModal;
@@ -157,19 +170,16 @@ document.querySelectorAll('[data-reset-id]').forEach((btn) => {
 
 document.getElementById('auto').onchange = (e) => {
   if (e.target.checked) {
-    timer = setInterval(refreshAll, 1000);
-    refreshAll();
-  } else if (timer) {
-    clearInterval(timer);
-    timer = null;
+    startAuto();
+  } else {
+    stopAuto();
   }
 };
 
 const now = new Date();
 dayInput.value = now.toISOString().slice(0, 10);
 
-refreshAll();
-timer = setInterval(refreshAll, 1000);
+startAuto();
 `;
   }
 
@@ -218,7 +228,7 @@ timer = setInterval(refreshAll, 1000);
       <h2>Controles</h2>
       <div class="line">
         <button id="btnRefresh" class="gray">Refrescar lectura</button>
-        <label><input id="auto" type="checkbox" checked /> Auto 1s</label>
+        <label><input id="auto" type="checkbox" checked /> Auto (vivo 2s / analisis 30s)</label>
       </div>
       <div id="statusLive" class="status">Esperando lectura...</div>
     </div>
