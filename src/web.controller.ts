@@ -5,149 +5,144 @@ export class WebController {
   @Get('app.js')
   @Header('Content-Type', 'application/javascript; charset=utf-8')
   appScript() {
-    return `window.addEventListener('error', (event) => {
-  const msg = 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ':' + event.colno + ')';
-  console.error(msg);
-  const plcInfoEl = document.getElementById('plcInfo');
-  if (plcInfoEl) {
-    plcInfoEl.textContent = msg;
-  }
-});
-
-const rows = document.getElementById('rows');
-const plcInfo = document.getElementById('plcInfo');
+    return `const liveRows = document.getElementById('liveRows');
 const analysisRows = document.getElementById('analysisRows');
+const statusLive = document.getElementById('statusLive');
+const statusAnalysis = document.getElementById('statusAnalysis');
+const statusReset = document.getElementById('statusReset');
+const dayInput = document.getElementById('day');
+
 let timer = null;
 
-function setStatus(id, text, ok = true) {
-  const el = document.getElementById(id);
+function setText(el, text, ok = true) {
   el.textContent = text;
-  el.className = 'status ' + (ok ? 'ok' : 'err');
+  el.style.color = ok ? '#14532d' : '#991b1b';
 }
 
-async function readAll() {
-  try {
-    const res = await fetch('/api/lecturas');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Error');
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || 'Error');
+  }
+  return data;
+}
 
-    plcInfo.textContent = 'PLC ' + data.plc.ip + ':' + data.plc.port + ' | ' + new Date(data.timestamp).toLocaleString();
-    rows.innerHTML = data.values.map(v =>
-      '<tr><td>' + v.name + '</td><td>D' + v.address + '</td><td>' + v.type + '</td><td>' + v.value + '</td></tr>'
-    ).join('');
+function trendLabel(trend) {
+  if (trend === 'PARO') return 'Parada';
+  if (trend === 'BAJO_VELOCIDAD') return 'Baja velocidad';
+  if (trend === 'SUBIO_VELOCIDAD') return 'Subio velocidad';
+  if (trend === 'ESTABLE') return 'Estable';
+  return 'Sin referencia';
+}
+
+function qualityLabel(pct) {
+  if (pct >= 85) return 'Alta';
+  if (pct >= 60) return 'Media';
+  return 'Baja';
+}
+
+function qualityClass(pct) {
+  if (pct >= 85) return 'q-high';
+  if (pct >= 60) return 'q-mid';
+  return 'q-low';
+}
+
+function renderLive(values) {
+  liveRows.innerHTML = values.map((v) =>
+    '<tr>' +
+      '<td>' + v.name + '</td>' +
+      '<td>D' + v.address + '</td>' +
+      '<td>' + v.type + '</td>' +
+      '<td>' + v.value + '</td>' +
+    '</tr>'
+  ).join('');
+}
+
+async function loadLive() {
+  try {
+    const data = await fetchJson('/api/lecturas');
+    renderLive(data.values);
+    setText(statusLive, 'PLC ' + data.plc.ip + ':' + data.plc.port + ' | ' + new Date(data.timestamp).toLocaleString(), true);
   } catch (err) {
-    setStatus('plcInfo', 'Fallo lectura: ' + err.message, false);
+    setText(statusLive, 'Error lectura: ' + err.message, false);
   }
 }
 
-document.getElementById('btnRefresh').onclick = readAll;
-document.getElementById('auto').onchange = (e) => {
-  if (e.target.checked) {
-    timer = setInterval(readAll, 2000);
-    readAll();
-  } else {
-    clearInterval(timer);
-  }
-};
-
-document.getElementById('btnResetStart').onclick = async () => {
-  try {
-    const res = await fetch('/api/pulsos/reset-all-start', { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Error');
-    setStatus('statusResetStart', data.message, true);
-    readAll();
-  } catch (err) {
-    setStatus('statusResetStart', 'Error: ' + err.message, false);
-  }
-};
-
-document.getElementById('btnPer').onclick = async () => {
-  const id = document.getElementById('perId').value;
-  const value = Number(document.getElementById('perVal').value);
-  try {
-    const res = await fetch('/api/perimetros/' + id, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Error');
-    setStatus('statusPer', 'OK ' + data.name + ' = ' + data.value, true);
-    readAll();
-  } catch (err) {
-    setStatus('statusPer', 'Error: ' + err.message, false);
-  }
-};
-
-document.getElementById('btnPul').onclick = async () => {
-  const id = document.getElementById('pulId').value;
-  const value = Number(document.getElementById('pulVal').value);
-  try {
-    const res = await fetch('/api/pulsos/' + id, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Error');
-    setStatus('statusPul', 'OK ' + data.name + ' = ' + data.value, true);
-    readAll();
-  } catch (err) {
-    setStatus('statusPul', 'Error: ' + err.message, false);
-  }
-};
-
-document.getElementById('btnAnalysis').onclick = async () => {
-  const day = document.getElementById('day').value;
+async function loadAnalysis() {
   const q = new URLSearchParams();
-  if (day) q.set('day', day);
+  if (dayInput.value) q.set('day', dayInput.value);
 
   try {
-    const res = await fetch('/api/analysis-day-table?' + q.toString());
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Error');
-
+    const data = await fetchJson('/api/analysis-day-table?' + q.toString());
     analysisRows.innerHTML = '';
 
     if (data.noData) {
-      setStatus('statusAnalysis', 'No hay datos', true);
+      setText(statusAnalysis, 'Sin datos para ese dia', true);
       return;
     }
 
-    const trendText = (trend) => {
-      if (trend === 'PARO') return 'Parada';
-      if (trend === 'BAJO_VELOCIDAD') return 'Bajo velocidad';
-      if (trend === 'SUBIO_VELOCIDAD') return 'Subio velocidad';
-      if (trend === 'ESTABLE') return 'Estable';
-      return 'Sin referencia';
-    };
-
-    const speedLabel = (row) => row.avgSpeed + ' ' + row.unit + '/s';
-    const machineLabel = (row) => row.machine + ' (' + row.unit + ')';
-
-    analysisRows.innerHTML = data.rows.map((row) =>
+    analysisRows.innerHTML = data.rows.map((r) =>
       '<tr>' +
-        '<td>' + row.hour + '</td>' +
-        '<td>' + machineLabel(row) + '</td>' +
-        '<td>' + speedLabel(row) + '</td>' +
-        '<td>' + row.stoppedSeconds + ' s</td>' +
-        '<td>' + trendText(row.trend) + '</td>' +
+        '<td>' + r.hour + '</td>' +
+        '<td>' + r.machine + '</td>' +
+        '<td>' + r.avgSpeed + ' ' + r.unit + '/s</td>' +
+        '<td>' + r.productionInHour + ' ' + r.unit + '</td>' +
+        '<td>' + r.stoppedSeconds + ' s</td>' +
+        '<td><span class="quality ' + qualityClass(r.dataQualityPct || 0) + '">' + qualityLabel(r.dataQualityPct || 0) + ' (' + (r.dataQualityPct || 0) + '%)</span></td>' +
+        '<td>' + trendLabel(r.trend) + '</td>' +
       '</tr>'
     ).join('');
 
-    setStatus('statusAnalysis', 'Filas: ' + data.rows.length + ' | Dia: ' + data.day, true);
+    const avgQuality = data.rows.length > 0
+      ? (data.rows.reduce((sum, row) => sum + (row.dataQualityPct || 0), 0) / data.rows.length).toFixed(1)
+      : '0.0';
+
+    setText(statusAnalysis, 'Filas: ' + data.rows.length + ' | Dia: ' + data.day + ' | Calidad prom: ' + avgQuality + '%', true);
   } catch (err) {
     analysisRows.innerHTML = '';
-    setStatus('statusAnalysis', 'Error: ' + err.message, false);
+    setText(statusAnalysis, 'Error analisis: ' + err.message, false);
+  }
+}
+
+async function resetMachine(id) {
+  try {
+    const data = await fetchJson('/api/pulsos/' + id + '/reset', { method: 'POST' });
+    setText(statusReset, data.message || 'Reset aplicado', true);
+    await loadLive();
+    await loadAnalysis();
+  } catch (err) {
+    setText(statusReset, 'Error reset: ' + err.message, false);
+  }
+}
+
+window.addEventListener('error', (event) => {
+  setText(statusLive, 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ')', false);
+});
+
+document.getElementById('btnRefresh').onclick = loadLive;
+document.getElementById('btnAnalyze').onclick = loadAnalysis;
+
+document.querySelectorAll('[data-reset-id]').forEach((btn) => {
+  btn.addEventListener('click', () => resetMachine(btn.getAttribute('data-reset-id')));
+});
+
+document.getElementById('auto').onchange = (e) => {
+  if (e.target.checked) {
+    timer = setInterval(loadLive, 4000);
+    loadLive();
+  } else if (timer) {
+    clearInterval(timer);
+    timer = null;
   }
 };
 
 const now = new Date();
-document.getElementById('day').value = now.toISOString().slice(0, 10);
+dayInput.value = now.toISOString().slice(0, 10);
 
-timer = setInterval(readAll, 2000);
-readAll();
+loadLive();
+loadAnalysis();
+timer = setInterval(loadLive, 4000);
 `;
   }
 
@@ -158,174 +153,94 @@ readAll();
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Panel Modbus SACOS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Panel Produccion</title>
   <style>
-    :root {
-      --bg: #eef6ff;
-      --card: #ffffff;
-      --ink: #0f172a;
-      --muted: #64748b;
-      --accent: #0f766e;
-      --accent-2: #0369a1;
-      --danger: #b91c1c;
-      --ok: #166534;
-      --ring: #99f6e4;
-      --border: #dbeafe;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(1000px 300px at 0% 0%, #ccfbf1 0%, transparent 60%),
-        radial-gradient(1000px 300px at 100% 0%, #dbeafe 0%, transparent 60%),
-        var(--bg);
-    }
-    .wrap { max-width: 1150px; margin: 0 auto; padding: 16px; }
-    .head {
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
-      color: white;
-      border-radius: 14px;
-      padding: 16px;
-      box-shadow: 0 10px 24px rgba(14, 116, 144, 0.2);
-    }
-    .head h1 { margin: 0; font-size: 1.25rem; }
-    .head p { margin: 6px 0 0; opacity: 0.9; }
-    .grid {
-      margin-top: 12px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 12px;
-    }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px;
-      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
-    }
-    .card h2 { margin: 0 0 10px; font-size: 1rem; }
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #f3f4f6; color: #111827; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    h1 { margin: 0 0 12px; font-size: 1.35rem; }
+    h2 { margin: 0 0 8px; font-size: 1.05rem; }
     .line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-    input, select, button {
-      min-height: 38px;
-      border-radius: 8px;
-      border: 1px solid #cbd5e1;
-      padding: 8px 10px;
-      font-size: 0.92rem;
-      outline: none;
-    }
-    input:focus, select:focus { border-color: #14b8a6; box-shadow: 0 0 0 3px var(--ring); }
-    button { border: none; color: white; background: var(--accent); font-weight: 600; cursor: pointer; }
-    button.alt { background: var(--accent-2); }
-    button.warn { background: var(--danger); }
-    .status {
-      margin-top: 6px;
-      padding: 8px 10px;
-      border-radius: 8px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      font-size: 0.88rem;
-      color: #334155;
-      white-space: pre-wrap;
-    }
-    .ok { color: var(--ok); }
-    .err { color: var(--danger); }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 0.88rem; }
-    th { background: #f8fafc; }
-    .analysis-wrap {
-      overflow-x: auto;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      margin-top: 8px;
-      background: #ffffff;
-    }
+    button, input { min-height: 36px; padding: 6px 10px; border-radius: 8px; border: 1px solid #d1d5db; }
+    button { cursor: pointer; background: #0f766e; color: #fff; border: none; }
+    button.gray { background: #374151; }
+    button.warn { background: #b91c1c; }
+    .status { font-size: 0.92rem; color: #14532d; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; font-size: 0.9rem; }
+    th { background: #f9fafb; }
+    .table-wrap { overflow-x: auto; }
+    .quality { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 0.82rem; }
+    .q-high { background: #dcfce7; color: #166534; }
+    .q-mid { background: #fef9c3; color: #854d0e; }
+    .q-low { background: #fee2e2; color: #991b1b; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="head">
-      <h1>Panel Modbus SACOS</h1>
-      <p>Registro automatico cada 2 segundos en SQLite + analisis de paros y baja de velocidad</p>
+    <h1>Panel Produccion Modbus</h1>
+
+    <div class="card">
+      <h2>Controles</h2>
+      <div class="line">
+        <button id="btnRefresh" class="gray">Refrescar lectura</button>
+        <label><input id="auto" type="checkbox" checked /> Auto 4s</label>
+      </div>
+      <div id="statusLive" class="status">Esperando lectura...</div>
     </div>
 
-    <div class="grid">
-      <div class="card">
-        <h2>Lectura en Vivo</h2>
-        <div class="line">
-          <button id="btnRefresh" class="alt">Refrescar</button>
-          <label><input id="auto" type="checkbox" checked /> Auto 2s</label>
-        </div>
-        <div id="plcInfo" class="status">Esperando...</div>
+    <div class="card">
+      <h2>Reset por maquina</h2>
+      <div class="line">
+        <button data-reset-id="1" class="warn">Reset Telar 1</button>
+        <button data-reset-id="2" class="warn">Reset Telar 2</button>
+        <button data-reset-id="3" class="warn">Reset Telar 3</button>
+        <button data-reset-id="4" class="warn">Reset Cortadora 1</button>
+        <button data-reset-id="5" class="warn">Reset Cortadora 2</button>
+        <button data-reset-id="6" class="warn">Reset Cortadora 3</button>
+        <button data-reset-id="7" class="warn">Reset Cortadora 4</button>
       </div>
+      <div id="statusReset" class="status">Sin acciones</div>
+    </div>
 
-      <div class="card">
-        <h2>Reset General de Pulsos</h2>
-        <div class="line">
-          <button id="btnResetStart" class="warn">Reset 1000-1060 e iniciar registro</button>
-        </div>
-        <div id="statusResetStart" class="status">Sin accion</div>
+    <div class="card">
+      <h2>Analisis Diario por Horas</h2>
+      <div class="line">
+        <input id="day" type="date" />
+        <button id="btnAnalyze">Analizar</button>
       </div>
-
-      <div class="card">
-        <h2>Perimetro</h2>
-        <div class="line">
-          <select id="perId"><option value="1">1 - Rodillo 1</option><option value="2">2 - Rodillo 2</option><option value="3">3 - Rodillo 3</option></select>
-          <input id="perVal" type="number" step="0.01" placeholder="0.51" />
-          <button id="btnPer">Guardar</button>
-        </div>
-        <div id="statusPer" class="status">Sin cambios</div>
-      </div>
-
-      <div class="card">
-        <h2>Pulsos Manual</h2>
-        <div class="line">
-          <select id="pulId">
-            <option value="1">1 - Telar 1</option><option value="2">2 - Telar 2</option><option value="3">3 - Telar 3</option>
-            <option value="4">4 - Cortadora 1</option><option value="5">5 - Cortadora 2</option><option value="6">6 - Cortadora 3</option>
-            <option value="7">7 - Cortadora 4</option>
-          </select>
-          <input id="pulVal" type="number" min="0" step="1" placeholder="1234" />
-          <button id="btnPul">Guardar</button>
-        </div>
-        <div id="statusPul" class="status">Sin cambios</div>
-      </div>
-
-      <div class="card">
-        <h2>Analisis Diario por Horas</h2>
-        <div class="line">
-          <input id="day" type="date" />
-          <button id="btnAnalysis" class="alt">Analizar</button>
-        </div>
-        <div id="statusAnalysis" class="status">Sin datos</div>
-        <div class="analysis-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Horas</th>
-                <th>Maquina</th>
-                <th>Vel promedio (hora)</th>
-                <th>Tiempo parado</th>
-                <th>Tendencia vs horas anteriores</th>
-              </tr>
-            </thead>
-            <tbody id="analysisRows"></tbody>
-          </table>
-        </div>
+      <div id="statusAnalysis" class="status">Sin analisis</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Horas</th>
+              <th>Maquina</th>
+              <th>Vel promedio (hora)</th>
+              <th>Produccion en la hora</th>
+              <th>Tiempo parado</th>
+              <th>Calidad de datos</th>
+              <th>Tendencia vs horas anteriores</th>
+            </tr>
+          </thead>
+          <tbody id="analysisRows"></tbody>
+        </table>
       </div>
     </div>
 
-    <div class="card" style="margin-top:12px;">
-      <h2>Variables</h2>
-      <table>
-        <thead><tr><th>Descripcion</th><th>Registro</th><th>Tipo</th><th>Valor</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
+    <div class="card">
+      <h2>Lectura en vivo</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Descripcion</th><th>Registro</th><th>Tipo</th><th>Valor</th></tr>
+          </thead>
+          <tbody id="liveRows"></tbody>
+        </table>
+      </div>
     </div>
   </div>
-
   <script src="/app.js"></script>
 </body>
 </html>`;

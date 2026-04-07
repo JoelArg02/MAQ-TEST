@@ -2,7 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Database, open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { DB_FILE } from './config';
-import { PULSOS, PULSE_ADDRESSES } from './modbus-map';
+import { PULSE_ADDRESSES } from './modbus-map';
 import { SnapshotValue } from './modbus.service';
 
 type PulsePoint = {
@@ -23,10 +23,34 @@ type HourMachineAgg = {
   hour: string;
   weightedSpeed: number;
   seconds: number;
+  sampledSeconds: number;
+  validSampleSeconds: number;
   stoppedSeconds: number;
   resetSeconds: number;
   productionDelta: number;
 };
+
+type AnalysisMachine = {
+  address: number;
+  machine: string;
+  machineType: 'TELAR' | 'CORTADORA';
+  unit: 'metros' | 'costales';
+};
+
+const ANALYSIS_MACHINES: AnalysisMachine[] = [
+  { address: 1100, machine: 'Telar 1', machineType: 'TELAR', unit: 'metros' },
+  { address: 1110, machine: 'Telar 2', machineType: 'TELAR', unit: 'metros' },
+  { address: 1120, machine: 'Telar 3', machineType: 'TELAR', unit: 'metros' },
+  { address: 1030, machine: 'Cortadora 1', machineType: 'CORTADORA', unit: 'costales' },
+  { address: 1040, machine: 'Cortadora 2', machineType: 'CORTADORA', unit: 'costales' },
+  { address: 1050, machine: 'Cortadora 3', machineType: 'CORTADORA', unit: 'costales' },
+  { address: 1060, machine: 'Cortadora 4', machineType: 'CORTADORA', unit: 'costales' },
+];
+
+const EXPECTED_SAMPLE_SECONDS = 4;
+const SAMPLE_MIN_SECONDS = 2;
+const SAMPLE_MAX_SECONDS = 8;
+const NO_CHANGE_GRACE_SECONDS = EXPECTED_SAMPLE_SECONDS * 2;
 
 @Injectable()
 export class StorageService implements OnModuleInit {
@@ -507,7 +531,8 @@ export class StorageService implements OnModuleInit {
     const fromEpoch = Math.floor(dayStart.getTime() / 1000);
     const toEpoch = Math.floor(dayEnd.getTime() / 1000);
 
-    const placeholders = PULSE_ADDRESSES.map(() => '?').join(',');
+    const analysisAddresses = ANALYSIS_MACHINES.map((m) => m.address);
+    const placeholders = analysisAddresses.map(() => '?').join(',');
     const rows = (await this.db.all(
       `SELECT epoch_seconds, address, value_num
        FROM readings
@@ -517,7 +542,7 @@ export class StorageService implements OnModuleInit {
        ORDER BY address ASC, epoch_seconds ASC`,
       fromEpoch,
       toEpoch,
-      ...PULSE_ADDRESSES,
+      ...analysisAddresses,
     )) as PulsePoint[];
 
     if (rows.length === 0) {
@@ -534,16 +559,6 @@ export class StorageService implements OnModuleInit {
         rows: [],
       };
     }
-
-    const machineDefs = Object.values(PULSOS).map((m) => {
-      const isTelar = m.name.toLowerCase().includes('telar');
-      return {
-        address: m.address,
-        machine: m.name,
-        kind: isTelar ? ('TELAR' as const) : ('CORTADORA' as const),
-        unit: isTelar ? ('metros' as const) : ('costales' as const),
-      };
-    });
 
     const byAddress = new Map<number, PulsePoint[]>();
     for (const row of rows) {
@@ -566,6 +581,7 @@ export class StorageService implements OnModuleInit {
       productionInHour: number;
       stoppedSeconds: number;
       resetSeconds: number;
+      dataQualityPct: number;
       baselineAvgSpeed: number | null;
       changeVsBaselinePct: number | null;
       changeVsPrevHourPct: number | null;
@@ -573,13 +589,14 @@ export class StorageService implements OnModuleInit {
       insight: string;
     }> = [];
 
-    for (const machine of machineDefs) {
+    for (const machine of ANALYSIS_MACHINES) {
       const points = byAddress.get(machine.address) ?? [];
       if (points.length < 2) {
         continue;
       }
 
       const byHour = new Map<string, HourMachineAgg>();
+      let noChangeStreakSeconds = 0;
       for (let i = 1; i < points.length; i++) {
         const prev = points[i - 1];
         const curr = points[i];
@@ -593,6 +610,8 @@ export class StorageService implements OnModuleInit {
           hour,
           weightedSpeed: 0,
           seconds: 0,
+          sampledSeconds: 0,
+          validSampleSeconds: 0,
           stoppedSeconds: 0,
           resetSeconds: 0,
           productionDelta: 0,
@@ -600,12 +619,22 @@ export class StorageService implements OnModuleInit {
 
         agg.weightedSpeed += speed * dt;
         agg.seconds += dt;
+        agg.sampledSeconds += dt;
+        if (dt >= SAMPLE_MIN_SECONDS && dt <= SAMPLE_MAX_SECONDS) {
+          agg.validSampleSeconds += dt;
+        }
         agg.productionDelta += delta;
 
         if (rawDelta < 0) {
           agg.resetSeconds += dt;
+          noChangeStreakSeconds = 0;
         } else if (delta <= 0) {
-          agg.stoppedSeconds += dt;
+          noChangeStreakSeconds += dt;
+          if (noChangeStreakSeconds > NO_CHANGE_GRACE_SECONDS) {
+            agg.stoppedSeconds += dt;
+          }
+        } else {
+          noChangeStreakSeconds = 0;
         }
 
         byHour.set(hour, agg);
@@ -616,6 +645,10 @@ export class StorageService implements OnModuleInit {
       for (let i = 0; i < hourly.length; i++) {
         const current = hourly[i];
         const avgSpeed = current.seconds > 0 ? current.weightedSpeed / current.seconds : 0;
+        const dataQualityPct =
+          current.sampledSeconds > 0
+            ? (current.validSampleSeconds / current.sampledSeconds) * 100
+            : 0;
 
         const prevHours = hourly.slice(Math.max(0, i - 3), i);
         const baselineCandidates = prevHours
@@ -671,12 +704,13 @@ export class StorageService implements OnModuleInit {
         allRows.push({
           hour: current.hour,
           machine: machine.machine,
-          machineType: machine.kind,
+          machineType: machine.machineType,
           unit: machine.unit,
           avgSpeed: Number(avgSpeed.toFixed(3)),
           productionInHour: Number(current.productionDelta.toFixed(3)),
           stoppedSeconds: current.stoppedSeconds,
           resetSeconds: current.resetSeconds,
+          dataQualityPct: Number(dataQualityPct.toFixed(1)),
           baselineAvgSpeed:
             baselineAvgSpeed === null ? null : Number(baselineAvgSpeed.toFixed(3)),
           changeVsBaselinePct:
@@ -711,6 +745,7 @@ export class StorageService implements OnModuleInit {
         'hour',
         'machine',
         'avgSpeed',
+        'productionInHour',
         'stoppedSeconds',
         'trend',
       ],

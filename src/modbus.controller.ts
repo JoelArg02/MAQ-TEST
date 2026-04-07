@@ -84,6 +84,26 @@ export class ModbusController {
     }
   }
 
+  @Post('pulsos/:id/reset')
+  async resetPulsosByMachine(@Param('id') id: string) {
+    try {
+      const response = await this.modbus.writePulsos(id, 0);
+      await this.storage.markEvent('RESET_PULSOS_BY_MACHINE', JSON.stringify(response));
+      return {
+        ...response,
+        message: `Pulsos reseteados en ${response.name}.`,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        `No se pudo resetear pulsos por maquina: ${(error as Error).message}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
   @Post('pulsos/reset-all-start')
   async resetAllPulsosAndStart() {
     try {
