@@ -49,7 +49,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       epochSeconds: r.epoch_seconds as number,
       address: r.address as number,
       name: r.name as string,
-      valueType: r.type as string,
+      type: r.type as string,
       valueNum: r.value_num as number | null,
       valueText: r.value_text as string | null,
     }));
@@ -60,7 +60,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
         'Content-Type': 'application/json',
         'X-Api-Key': KEY_BACK,
       },
-      body: JSON.stringify({ batchId, readings, events: [] }),
+      body: JSON.stringify({ batchId, capturedAt: new Date().toISOString(), readings, events: [] }),
     });
 
     if (!res.ok) {
