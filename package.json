@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "ts-node nestjs_modbus_server.ts",
+    "start": "ts-node src/main.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -24,7 +24,9 @@
     "@nestjs/platform-express": "^11.1.18",
     "modbus-serial": "^8.0.25",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
