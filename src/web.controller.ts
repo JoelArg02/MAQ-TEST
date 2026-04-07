@@ -120,12 +120,36 @@ async function resetMachine(id) {
   }
 }
 
+function showModal() {
+  document.getElementById('resetModal').style.display = 'flex';
+}
+function hideModal() {
+  document.getElementById('resetModal').style.display = 'none';
+}
+
+async function fullReset() {
+  hideModal();
+  setText(statusReset, 'Ejecutando reset completo...', true);
+  try {
+    const data = await fetchJson('/api/full-reset', { method: 'POST' });
+    setText(statusReset, data.message || 'Reset completo exitoso', true);
+    analysisRows.innerHTML = '';
+    setText(statusAnalysis, 'DB limpia, esperando nuevos datos...', true);
+    await loadLive();
+  } catch (err) {
+    setText(statusReset, 'Error reset completo: ' + err.message, false);
+  }
+}
+
 window.addEventListener('error', (event) => {
   setText(statusLive, 'JS error: ' + event.message + ' (' + event.filename + ':' + event.lineno + ')', false);
 });
 
 document.getElementById('btnRefresh').onclick = refreshAll;
 document.getElementById('btnAnalyze').onclick = loadAnalysis;
+document.getElementById('btnFullReset').onclick = showModal;
+document.getElementById('modalCancel').onclick = hideModal;
+document.getElementById('modalConfirm').onclick = fullReset;
 
 document.querySelectorAll('[data-reset-id]').forEach((btn) => {
   btn.addEventListener('click', () => resetMachine(btn.getAttribute('data-reset-id')));
@@ -178,6 +202,12 @@ timer = setInterval(refreshAll, 1000);
     .q-high { background: #dcfce7; color: #166534; }
     .q-mid { background: #fef9c3; color: #854d0e; }
     .q-low { background: #fee2e2; color: #991b1b; }
+    .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+    .modal { background: #fff; border-radius: 12px; padding: 24px; max-width: 420px; width: 90%; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,0.25); }
+    .modal h3 { margin: 0 0 12px; color: #991b1b; }
+    .modal p { margin: 0 0 20px; font-size: 0.95rem; color: #374151; }
+    .modal-btns { display: flex; gap: 10px; justify-content: center; }
+    .modal-btns button { min-width: 120px; }
   </style>
 </head>
 <body>
@@ -204,7 +234,21 @@ timer = setInterval(refreshAll, 1000);
         <button data-reset-id="6" class="warn">Reset Cortadora 3</button>
         <button data-reset-id="7" class="warn">Reset Cortadora 4</button>
       </div>
+      <div class="line">
+        <button id="btnFullReset" class="warn" style="background:#7f1d1d;margin-top:4px">Reset COMPLETO (PLC + BD)</button>
+      </div>
       <div id="statusReset" class="status">Sin acciones</div>
+    </div>
+
+    <div id="resetModal" class="modal-bg">
+      <div class="modal">
+        <h3>Confirmar Reset Completo</h3>
+        <p>Esto va a resetear los pulsos de TODAS las maquinas (D1000-D1060) y borrar TODOS los datos de la base de datos (lecturas, eventos, anomalias).<br><br><strong>Esta accion no se puede deshacer.</strong></p>
+        <div class="modal-btns">
+          <button id="modalCancel" class="gray">Cancelar</button>
+          <button id="modalConfirm" class="warn">Si, resetear todo</button>
+        </div>
+      </div>
     </div>
 
     <div class="card">

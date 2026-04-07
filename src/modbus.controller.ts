@@ -125,6 +125,30 @@ export class ModbusController {
     }
   }
 
+  @Post('full-reset')
+  async fullReset() {
+    try {
+      const plcResult = await this.modbus.resetAllPulsos();
+      const dbResult = await this.storage.clearAllData();
+      await this.storage.markEvent('FULL_RESET', JSON.stringify({ plcResult, dbResult }));
+      await this.logger.captureNow();
+      return {
+        ok: true,
+        message: 'Reset completo: PLC (D1000-D1060) y base de datos limpiados.',
+        plc: plcResult,
+        db: dbResult,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        `No se pudo hacer reset completo: ${(error as Error).message}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
   @Post('reset/:memory')
   async reset(@Param('memory') memory: string) {
     try {
@@ -208,6 +232,18 @@ export class ModbusController {
     } catch (error) {
       throw new HttpException(
         `No se pudo generar la tabla diaria: ${(error as Error).message}`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
+
+  @Get('anomalies')
+  async anomalies(@Query('day') day?: string) {
+    try {
+      return await this.storage.getAnomalies(day);
+    } catch (error) {
+      throw new HttpException(
+        `No se pudo obtener anomalias: ${(error as Error).message}`,
         HttpStatus.BAD_REQUEST,
       );
     }

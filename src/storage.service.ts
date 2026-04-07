@@ -157,11 +157,43 @@ export class StorageService implements OnModuleInit {
         event_type TEXT NOT NULL,
         details TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS anomalies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        detected_at TEXT NOT NULL,
+        epoch_seconds INTEGER NOT NULL,
+        address INTEGER NOT NULL,
+        machine TEXT NOT NULL,
+        anomaly_type TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        speed_observed REAL NOT NULL,
+        speed_ewma REAL NOT NULL,
+        z_score REAL NOT NULL,
+        sigma_mad REAL NOT NULL,
+        details TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_anomalies_epoch ON anomalies(epoch_seconds);
+      CREATE INDEX IF NOT EXISTS idx_anomalies_addr ON anomalies(address, epoch_seconds);
     `);
       })();
     }
 
     await this.initPromise;
+  }
+
+  async clearAllData(): Promise<{ deleted: { readings: number; events: number; anomalies: number } }> {
+    await this.ensureReady();
+    const r = await this.db.run(`DELETE FROM readings`);
+    const e = await this.db.run(`DELETE FROM events`);
+    const a = await this.db.run(`DELETE FROM anomalies`);
+    return {
+      deleted: {
+        readings: r.changes ?? 0,
+        events: e.changes ?? 0,
+        anomalies: a.changes ?? 0,
+      },
+    };
   }
 
   async markEvent(eventType: string, details: string): Promise<void> {
@@ -634,6 +666,19 @@ export class StorageService implements OnModuleInit {
       return `${String(d.getHours()).padStart(2, '0')}:00`;
     };
 
+    const pendingAnomalies: Array<{
+      epoch_seconds: number;
+      address: number;
+      machine: string;
+      anomaly_type: string;
+      severity: string;
+      speed_observed: number;
+      speed_ewma: number;
+      z_score: number;
+      sigma_mad: number;
+      details: string;
+    }> = [];
+
     const allRows: Array<{
       hour: string;
       machine: string;
@@ -789,6 +834,59 @@ export class StorageService implements OnModuleInit {
 
       const hourly = [...byHour.values()].sort((a, b) => a.hour.localeCompare(b.hour));
 
+      // --- Detección silenciosa de anomalías (Z-score robusto MAD) ---
+      const productiveSpeeds: number[] = [];
+      for (const iv of intervals) {
+        if (!iv.isReset && iv.adjustedDelta > 0 && iv.dt > 0) {
+          productiveSpeeds.push(iv.adjustedDelta / iv.dt);
+        }
+      }
+      if (productiveSpeeds.length >= 10) {
+        const sortedSp = [...productiveSpeeds].sort((a, b) => a - b);
+        const pctSp = (arr: number[], p: number) => {
+          const idx = (p / 100) * (arr.length - 1);
+          const lo = Math.floor(idx);
+          const hi = Math.ceil(idx);
+          return lo === hi ? arr[lo] : arr[lo] * (hi - idx) + arr[hi] * (idx - lo);
+        };
+        const medianSp = pctSp(sortedSp, 50);
+        const madSp = pctSp(sortedSp.map((s) => Math.abs(s - medianSp)).sort((a, b) => a - b), 50);
+        const sigmaSp = madSp * 1.4826;
+
+        if (sigmaSp > 0) {
+          let ew = 0;
+          let ewInit = false;
+          for (const iv of intervals) {
+            if (iv.isReset || iv.dt <= 0) continue;
+            const sp = iv.adjustedDelta / iv.dt;
+            if (iv.adjustedDelta > 0) {
+              ew = ewInit ? 0.3 * sp + 0.7 * ew : sp;
+              ewInit = true;
+            }
+            const zG = Math.abs(sp - medianSp) / sigmaSp;
+            const zE = ewInit ? Math.abs(sp - ew) / sigmaSp : 0;
+            const z = Math.max(zG, zE);
+            if (z >= 3) {
+              const sev = z >= 5 ? 'CRITICA' : z >= 4 ? 'ALTA' : 'MEDIA';
+              const aType = sp > medianSp ? 'PICO_VELOCIDAD' : sp > 0 ? 'CAIDA_VELOCIDAD' : 'PARO_ANOMALO';
+              const ref = ewInit ? ew : medianSp;
+              pendingAnomalies.push({
+                epoch_seconds: iv.from,
+                address: machine.address,
+                machine: machine.machine,
+                anomaly_type: aType,
+                severity: sev,
+                speed_observed: sp,
+                speed_ewma: ref,
+                z_score: z,
+                sigma_mad: sigmaSp,
+                details: `v=${sp.toFixed(3)} ref=${ref.toFixed(3)} z=${z.toFixed(2)} σ=${sigmaSp.toFixed(4)} med=${medianSp.toFixed(3)}`,
+              });
+            }
+          }
+        }
+      }
+
       for (let i = 0; i < hourly.length; i++) {
         const current = hourly[i];
         const avgSpeed = current.runningSeconds > 0 ? current.weightedSpeed / current.runningSeconds : 0;
@@ -878,6 +976,32 @@ export class StorageService implements OnModuleInit {
       return a.machine.localeCompare(b.machine);
     });
 
+    // Persistir anomalías silenciosamente (no se muestran en UI, solo referencia futura)
+    if (pendingAnomalies.length > 0) {
+      try {
+        await this.db.exec('BEGIN');
+        for (const a of pendingAnomalies) {
+          const exists = await this.db.get(
+            `SELECT id FROM anomalies WHERE epoch_seconds = ? AND address = ?`,
+            a.epoch_seconds,
+            a.address,
+          );
+          if (!exists) {
+            await this.db.run(
+              `INSERT INTO anomalies(detected_at, epoch_seconds, address, machine, anomaly_type, severity, speed_observed, speed_ewma, z_score, sigma_mad, details)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              new Date().toISOString(),
+              a.epoch_seconds, a.address, a.machine, a.anomaly_type, a.severity,
+              a.speed_observed, a.speed_ewma, a.z_score, a.sigma_mad, a.details,
+            );
+          }
+        }
+        await this.db.exec('COMMIT');
+      } catch {
+        await this.db.exec('ROLLBACK');
+      }
+    }
+
     return {
       day: dayStart.toISOString().slice(0, 10),
       fromEpoch,
@@ -898,5 +1022,26 @@ export class StorageService implements OnModuleInit {
       ],
       rows: allRows,
     };
+  }
+
+  async getAnomalies(dayInput?: string) {
+    await this.ensureReady();
+    const baseDate = dayInput ? new Date(`${dayInput}T00:00:00`) : new Date();
+    if (Number.isNaN(baseDate.getTime())) throw new Error(`Fecha invalida: ${dayInput}`);
+    const dayStart = new Date(baseDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+    const fromEpoch = Math.floor(dayStart.getTime() / 1000);
+    const toEpoch = Math.floor(dayEnd.getTime() / 1000);
+
+    return this.db.all(
+      `SELECT id, detected_at, epoch_seconds, address, machine, anomaly_type, severity,
+              speed_observed, speed_ewma, z_score, sigma_mad, details
+       FROM anomalies
+       WHERE epoch_seconds BETWEEN ? AND ?
+       ORDER BY epoch_seconds DESC`,
+      fromEpoch, toEpoch,
+    );
   }
 }
