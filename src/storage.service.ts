@@ -23,6 +23,7 @@ type HourMachineAgg = {
   hour: string;
   weightedSpeed: number;
   seconds: number;
+  runningSeconds: number;
   sampledSeconds: number;
   validSampleSeconds: number;
   stoppedSeconds: number;
@@ -47,10 +48,71 @@ const ANALYSIS_MACHINES: AnalysisMachine[] = [
   { address: 1060, machine: 'Cortadora 4', machineType: 'CORTADORA', unit: 'costales' },
 ];
 
-const EXPECTED_SAMPLE_SECONDS = 4;
-const SAMPLE_MIN_SECONDS = 2;
-const SAMPLE_MAX_SECONDS = 8;
-const NO_CHANGE_GRACE_SECONDS = EXPECTED_SAMPLE_SECONDS * 2;
+/**
+ * Calcula umbrales adaptativos a partir de los dt observados usando estadística robusta.
+ * - Mediana: estimador de tendencia central resistente a outliers
+ * - MAD (Median Absolute Deviation): dispersión robusta, superior a desviación estándar con datos no‑gaussianos
+ * - Factor 1.4826: constante de consistencia para convertir MAD → estimación de σ bajo distribución normal
+ * - Percentiles P75/P95: límites empíricos basados en la distribución real del muestreo
+ */
+function computeAdaptiveThresholds(dts: number[]) {
+  const HARD_CAP_GRACE = 30;        // segundos — nunca esperar más de 30s antes de declarar paro
+  const HARD_CAP_CATCHUP = 120;     // segundos — ventana máxima de redistribución: 2 min
+  const MIN_SAMPLES_FOR_STATS = 10; // mínimo de intervalos para estadística confiable
+
+  // Fallback conservador cuando no hay suficientes datos
+  if (dts.length < MIN_SAMPLES_FOR_STATS) {
+    return {
+      medianDt: 2,
+      graceSeconds: 6,
+      catchUpWindowMax: 20,
+      sampleMin: 1,
+      sampleMax: 10,
+    };
+  }
+
+  const sorted = [...dts].sort((a, b) => a - b);
+
+  // Interpolación lineal para percentiles (método estándar NIST)
+  const pct = (arr: number[], p: number) => {
+    const idx = (p / 100) * (arr.length - 1);
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    return lo === hi ? arr[lo] : arr[lo] * (hi - idx) + arr[hi] * (idx - lo);
+  };
+
+  const median = pct(sorted, 50);
+  const p75 = pct(sorted, 75);
+  const p95 = pct(sorted, 95);
+  const iqr = p75 - pct(sorted, 25); // rango intercuartílico
+
+  // MAD y estimación robusta de σ
+  const deviations = sorted.map((d) => Math.abs(d - median)).sort((a, b) => a - b);
+  const mad = pct(deviations, 50);
+  const sigma = mad * 1.4826; // σ̂ robusto
+
+  // --- Grace (tolerancia antes de declarar paro) ---
+  // Toma el máximo entre: P75×2 (cubre jitter normal) y median+3σ (límite estadístico ~99.7%)
+  // Mínimo 4s para no ser demasiado agresivo.
+  const graceSeconds = Math.min(
+    Math.max(p75 * 2, median + 3 * sigma, 4),
+    HARD_CAP_GRACE,
+  );
+
+  // --- Catch-up window (redistribución de picos de latencia) ---
+  // P95×3 cubre la peor latencia observada con margen; IQR×6 como respaldo si P95 es bajo.
+  const catchUpWindowMax = Math.min(
+    Math.max(p95 * 3, median + iqr * 6, 10),
+    HARD_CAP_CATCHUP,
+  );
+
+  // --- Rango válido de dt para métrica de calidad de datos ---
+  // median ± 2σ (intervalo de ~95% bajo normalidad)
+  const sampleMin = Math.max(1, Math.floor(median - 2 * sigma));
+  const sampleMax = Math.max(sampleMin + 1, Math.ceil(median + 2 * sigma));
+
+  return { medianDt: median, graceSeconds, catchUpWindowMax, sampleMin, sampleMax };
+}
 
 @Injectable()
 export class StorageService implements OnModuleInit {
@@ -595,21 +657,105 @@ export class StorageService implements OnModuleInit {
         continue;
       }
 
-      const byHour = new Map<string, HourMachineAgg>();
-      let noChangeStreakSeconds = 0;
+      const intervals: Array<{
+        from: number;
+        to: number;
+        dt: number;
+        rawDelta: number;
+        adjustedDelta: number;
+        isReset: boolean;
+      }> = [];
+
       for (let i = 1; i < points.length; i++) {
         const prev = points[i - 1];
         const curr = points[i];
         const dt = Math.max(1, curr.epoch_seconds - prev.epoch_seconds);
         const rawDelta = curr.value_num - prev.value_num;
-        const delta = rawDelta < 0 ? 0 : rawDelta;
-        const speed = delta / dt;
+        const isReset = rawDelta < 0;
+        intervals.push({
+          from: prev.epoch_seconds,
+          to: curr.epoch_seconds,
+          dt,
+          rawDelta,
+          adjustedDelta: isReset ? 0 : Math.max(0, rawDelta),
+          isReset,
+        });
+      }
 
-        const hour = toHourKey(prev.epoch_seconds);
+      // --- Umbrales adaptativos a partir de los dt reales de esta máquina ---
+      const machineDts = intervals.map((iv) => iv.dt);
+      const thresholds = computeAdaptiveThresholds(machineDts);
+
+      // Redistribuye picos tardios en una ventana adaptativa previa de ceros.
+      // Usa EWMA de velocidades recientes para detectar bursts estadísticamente anómalos.
+      const EWMA_ALPHA = 0.3; // factor de suavizado — prioriza muestras recientes
+      let ewmaSpeed = 0;
+      let ewmaInitialized = false;
+
+      for (let i = 0; i < intervals.length; i++) {
+        const current = intervals[i];
+        const currentSpeed = current.dt > 0 ? current.adjustedDelta / current.dt : 0;
+
+        // Actualiza EWMA con intervalos productivos normales
+        if (current.rawDelta > 0 && !current.isReset) {
+          const rawSpeed = current.rawDelta / current.dt;
+          if (!ewmaInitialized) {
+            ewmaSpeed = rawSpeed;
+            ewmaInitialized = true;
+          } else {
+            ewmaSpeed = EWMA_ALPHA * rawSpeed + (1 - EWMA_ALPHA) * ewmaSpeed;
+          }
+        }
+
+        if (current.rawDelta <= 0 || current.isReset) {
+          continue;
+        }
+
+        // Detección de burst: delta actual significativamente mayor que EWMA
+        // Solo redistribuir si hay intervalos cero previos
+        let j = i - 1;
+        while (
+          j >= 0
+          && !intervals[j].isReset
+          && intervals[j].rawDelta === 0
+        ) {
+          j--;
+        }
+
+        const start = j + 1;
+        if (start === i) {
+          continue;
+        }
+
+        let windowSeconds = 0;
+        for (let k = start; k <= i; k++) {
+          windowSeconds += intervals[k].dt;
+        }
+
+        if (windowSeconds <= 0 || windowSeconds > thresholds.catchUpWindowMax) {
+          continue;
+        }
+
+        const redistributedRate = current.rawDelta / windowSeconds;
+        for (let k = start; k <= i; k++) {
+          intervals[k].adjustedDelta = redistributedRate * intervals[k].dt;
+        }
+      }
+
+      const byHour = new Map<string, HourMachineAgg>();
+      let noChangeStreakSeconds = 0;
+      for (const interval of intervals) {
+        const dt = interval.dt;
+        const rawDelta = interval.rawDelta;
+        const delta = interval.adjustedDelta;
+        const speed = dt > 0 ? delta / dt : 0;
+
+        const hour = toHourKey(interval.from);
         const agg = byHour.get(hour) ?? {
           hour,
           weightedSpeed: 0,
           seconds: 0,
+          runningSeconds: 0,
           sampledSeconds: 0,
           validSampleSeconds: 0,
           stoppedSeconds: 0,
@@ -617,23 +763,24 @@ export class StorageService implements OnModuleInit {
           productionDelta: 0,
         };
 
-        agg.weightedSpeed += speed * dt;
         agg.seconds += dt;
         agg.sampledSeconds += dt;
-        if (dt >= SAMPLE_MIN_SECONDS && dt <= SAMPLE_MAX_SECONDS) {
+        if (dt >= thresholds.sampleMin && dt <= thresholds.sampleMax) {
           agg.validSampleSeconds += dt;
         }
         agg.productionDelta += delta;
 
-        if (rawDelta < 0) {
+        if (interval.isReset) {
           agg.resetSeconds += dt;
           noChangeStreakSeconds = 0;
         } else if (delta <= 0) {
           noChangeStreakSeconds += dt;
-          if (noChangeStreakSeconds > NO_CHANGE_GRACE_SECONDS) {
+          if (noChangeStreakSeconds > thresholds.graceSeconds) {
             agg.stoppedSeconds += dt;
           }
         } else {
+          agg.weightedSpeed += speed * dt;
+          agg.runningSeconds += dt;
           noChangeStreakSeconds = 0;
         }
 
@@ -644,7 +791,7 @@ export class StorageService implements OnModuleInit {
 
       for (let i = 0; i < hourly.length; i++) {
         const current = hourly[i];
-        const avgSpeed = current.seconds > 0 ? current.weightedSpeed / current.seconds : 0;
+        const avgSpeed = current.runningSeconds > 0 ? current.weightedSpeed / current.runningSeconds : 0;
         const dataQualityPct =
           current.sampledSeconds > 0
             ? (current.validSampleSeconds / current.sampledSeconds) * 100
@@ -652,7 +799,7 @@ export class StorageService implements OnModuleInit {
 
         const prevHours = hourly.slice(Math.max(0, i - 3), i);
         const baselineCandidates = prevHours
-          .map((x) => (x.seconds > 0 ? x.weightedSpeed / x.seconds : 0))
+          .map((x) => (x.runningSeconds > 0 ? x.weightedSpeed / x.runningSeconds : 0))
           .filter((x) => x > 0);
 
         const baselineAvgSpeed =
@@ -661,8 +808,8 @@ export class StorageService implements OnModuleInit {
             : null;
 
         const prevHourAvg =
-          i > 0 && hourly[i - 1].seconds > 0
-            ? hourly[i - 1].weightedSpeed / hourly[i - 1].seconds
+          i > 0 && hourly[i - 1].runningSeconds > 0
+            ? hourly[i - 1].weightedSpeed / hourly[i - 1].runningSeconds
             : null;
 
         const changeVsBaselinePct =
