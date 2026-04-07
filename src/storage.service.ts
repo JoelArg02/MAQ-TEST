@@ -11,6 +11,14 @@ type PulsePoint = {
   value_num: number;
 };
 
+type IntervalPoint = {
+  from: number;
+  to: number;
+  dt: number;
+  delta: number;
+  speed: number;
+};
+
 @Injectable()
 export class StorageService implements OnModuleInit {
   private db!: Database;
@@ -242,6 +250,235 @@ export class StorageService implements OnModuleInit {
       samples: epochs.length,
       overall: summarize(totalDeltas),
       byMachine,
+    };
+  }
+
+  async analyzeDayByHours(dayInput?: string) {
+    await this.ensureReady();
+
+    const baseDate = dayInput ? new Date(`${dayInput}T00:00:00`) : new Date();
+    if (Number.isNaN(baseDate.getTime())) {
+      throw new Error(`Fecha invalida: ${dayInput}`);
+    }
+
+    const dayStart = new Date(baseDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const fromEpoch = Math.floor(dayStart.getTime() / 1000);
+    const toEpoch = Math.floor(dayEnd.getTime() / 1000);
+
+    const placeholders = PULSE_ADDRESSES.map(() => '?').join(',');
+    const rows = (await this.db.all(
+      `SELECT epoch_seconds, address, value_num
+       FROM readings
+       WHERE epoch_seconds BETWEEN ? AND ?
+         AND address IN (${placeholders})
+         AND value_num IS NOT NULL
+       ORDER BY epoch_seconds ASC, address ASC`,
+      fromEpoch,
+      toEpoch,
+      ...PULSE_ADDRESSES,
+    )) as PulsePoint[];
+
+    const byEpoch = new Map<number, Map<number, number>>();
+    for (const row of rows) {
+      const map = byEpoch.get(row.epoch_seconds) ?? new Map<number, number>();
+      map.set(row.address, row.value_num);
+      byEpoch.set(row.epoch_seconds, map);
+    }
+
+    const epochs = [...byEpoch.keys()].sort((a, b) => a - b);
+    if (epochs.length < 2) {
+      return {
+        day: dayStart.toISOString().slice(0, 10),
+        fromEpoch,
+        toEpoch,
+        noData: true,
+        message: 'No hay datos',
+        hourly: [],
+        events: [],
+        summary: {
+          avgSpeed: 0,
+          stoppedSeconds: 0,
+          lowSpeedSeconds: 0,
+        },
+      };
+    }
+
+    const intervals: IntervalPoint[] = [];
+    for (let i = 1; i < epochs.length; i++) {
+      const prevEpoch = epochs[i - 1];
+      const currEpoch = epochs[i];
+      const prev = byEpoch.get(prevEpoch)!;
+      const curr = byEpoch.get(currEpoch)!;
+      const dt = Math.max(1, currEpoch - prevEpoch);
+
+      let totalDelta = 0;
+      for (const addr of PULSE_ADDRESSES) {
+        const p = prev.get(addr);
+        const c = curr.get(addr);
+        if (p === undefined || c === undefined) {
+          continue;
+        }
+        totalDelta += c - p;
+      }
+
+      intervals.push({
+        from: prevEpoch,
+        to: currEpoch,
+        dt,
+        delta: totalDelta,
+        speed: totalDelta / dt,
+      });
+    }
+
+    const positive = intervals.filter((x) => x.speed > 0);
+    const avgSpeed = positive.length > 0 ? positive.reduce((a, b) => a + b.speed, 0) / positive.length : 0;
+    const lowThreshold = avgSpeed * 0.6;
+    const recoverThreshold = avgSpeed * 0.9;
+
+    const toHourKey = (epoch: number) => {
+      const d = new Date(epoch * 1000);
+      return `${String(d.getHours()).padStart(2, '0')}:00`;
+    };
+
+    const hourAgg = new Map<string, { weightedSpeed: number; seconds: number; stopped: number; low: number }>();
+    for (const it of intervals) {
+      const key = toHourKey(it.from);
+      const current = hourAgg.get(key) ?? { weightedSpeed: 0, seconds: 0, stopped: 0, low: 0 };
+      current.weightedSpeed += it.speed * it.dt;
+      current.seconds += it.dt;
+      if (it.delta <= 0) {
+        current.stopped += it.dt;
+      } else if (avgSpeed > 0 && it.speed < lowThreshold) {
+        current.low += it.dt;
+      }
+      hourAgg.set(key, current);
+    }
+
+    const hourly = [...hourAgg.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([hour, v]) => ({
+        hour,
+        avgSpeed: v.seconds > 0 ? Number((v.weightedSpeed / v.seconds).toFixed(3)) : 0,
+        stoppedSeconds: v.stopped,
+        lowSpeedSeconds: v.low,
+      }));
+
+    const events: Array<{ type: string; approxTime: string; epoch: number; detail: string }> = [];
+    const toTimeText = (epoch: number) => new Date(epoch * 1000).toLocaleTimeString();
+
+    let state: 'stopped' | 'low' | 'normal' = 'normal';
+    if (intervals[0].delta <= 0) {
+      state = 'stopped';
+    } else if (avgSpeed > 0 && intervals[0].speed < lowThreshold) {
+      state = 'low';
+    }
+
+    for (let i = 1; i < intervals.length; i++) {
+      const it = intervals[i];
+      const previous = intervals[i - 1];
+
+      const currentState: 'stopped' | 'low' | 'normal' =
+        it.delta <= 0
+          ? 'stopped'
+          : avgSpeed > 0 && it.speed < lowThreshold
+            ? 'low'
+            : 'normal';
+
+      if (state !== currentState) {
+        if (state !== 'stopped' && currentState === 'stopped') {
+          events.push({
+            type: 'PARO_INICIO',
+            approxTime: toTimeText(it.from),
+            epoch: it.from,
+            detail: 'Se detuvo la produccion (delta <= 0).',
+          });
+        }
+
+        if (state === 'stopped' && currentState !== 'stopped') {
+          events.push({
+            type: 'PARO_FIN',
+            approxTime: toTimeText(it.from),
+            epoch: it.from,
+            detail: 'Volvio a producir despues de paro.',
+          });
+        }
+
+        if (state === 'normal' && currentState === 'low') {
+          events.push({
+            type: 'BAJA_VELOCIDAD',
+            approxTime: toTimeText(it.from),
+            epoch: it.from,
+            detail: `Velocidad por debajo de ${lowThreshold.toFixed(3)}.`,
+          });
+        }
+
+        if (state === 'low' && currentState === 'normal' && it.speed >= recoverThreshold) {
+          events.push({
+            type: 'SUBIDA_VELOCIDAD',
+            approxTime: toTimeText(it.from),
+            epoch: it.from,
+            detail: `Recuperacion de velocidad por encima de ${recoverThreshold.toFixed(3)}.`,
+          });
+        }
+
+        if (state === 'stopped' && currentState === 'low') {
+          events.push({
+            type: 'REINICIO_LENTO',
+            approxTime: toTimeText(it.from),
+            epoch: it.from,
+            detail: 'Reinicio en velocidad baja.',
+          });
+        }
+
+        state = currentState;
+      }
+
+      if (previous.speed > 0 && it.speed > previous.speed * 1.5 && it.speed >= recoverThreshold) {
+        events.push({
+          type: 'SUBIDA_BRUSCA',
+          approxTime: toTimeText(it.from),
+          epoch: it.from,
+          detail: 'Subida brusca de velocidad respecto al tramo anterior.',
+        });
+      }
+
+      if (previous.speed > 0 && it.speed < previous.speed * 0.6 && it.delta > 0) {
+        events.push({
+          type: 'BAJADA_BRUSCA',
+          approxTime: toTimeText(it.from),
+          epoch: it.from,
+          detail: 'Bajada brusca de velocidad respecto al tramo anterior.',
+        });
+      }
+    }
+
+    let stoppedSeconds = 0;
+    let lowSpeedSeconds = 0;
+    for (const it of intervals) {
+      if (it.delta <= 0) {
+        stoppedSeconds += it.dt;
+      } else if (avgSpeed > 0 && it.speed < lowThreshold) {
+        lowSpeedSeconds += it.dt;
+      }
+    }
+
+    return {
+      day: dayStart.toISOString().slice(0, 10),
+      fromEpoch,
+      toEpoch,
+      noData: false,
+      message: '',
+      summary: {
+        avgSpeed: Number(avgSpeed.toFixed(3)),
+        stoppedSeconds,
+        lowSpeedSeconds,
+      },
+      hourly,
+      events,
     };
   }
 }

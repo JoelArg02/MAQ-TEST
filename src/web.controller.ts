@@ -138,10 +138,9 @@ export class WebController {
       </div>
 
       <div class="card">
-        <h2>Analisis Noche / Intervalo</h2>
+        <h2>Analisis Diario por Horas</h2>
         <div class="line">
-          <input id="from" type="datetime-local" />
-          <input id="to" type="datetime-local" />
+          <input id="day" type="date" />
           <button id="btnAnalysis" class="alt">Analizar</button>
         </div>
         <div id="statusAnalysis" class="status">Sin datos</div>
@@ -161,12 +160,6 @@ export class WebController {
     const rows = document.getElementById('rows');
     const plcInfo = document.getElementById('plcInfo');
     let timer = null;
-
-    function stampFromLocal(value) {
-      if (!value) return '';
-      const d = new Date(value);
-      return Math.floor(d.getTime() / 1000).toString();
-    }
 
     function setStatus(id, text, ok = true) {
       const el = document.getElementById(id);
@@ -248,26 +241,39 @@ export class WebController {
     };
 
     document.getElementById('btnAnalysis').onclick = async () => {
-      const from = stampFromLocal(document.getElementById('from').value);
-      const to = stampFromLocal(document.getElementById('to').value);
+      const day = document.getElementById('day').value;
       const q = new URLSearchParams();
-      if (from) q.set('from', from);
-      if (to) q.set('to', to);
+      if (day) q.set('day', day);
 
       try {
-        const res = await fetch('/api/analysis?' + q.toString());
+        const res = await fetch('/api/analysis-day?' + q.toString());
         const data = await res.json();
         if (!res.ok) throw new Error(data.message || 'Error');
 
+        if (data.noData) {
+          setStatus('statusAnalysis', 'No hay datos', true);
+          return;
+        }
+
+        const hourlyLines = data.hourly.length > 0
+          ? data.hourly.map(h => h.hour + ' -> prom=' + h.avgSpeed + ', paro=' + h.stoppedSeconds + 's, baja=' + h.lowSpeedSeconds + 's')
+          : ['No hay datos'];
+
+        const eventLines = data.events.length > 0
+          ? data.events.map(e => e.approxTime + ' [' + e.type + '] ' + e.detail)
+          : ['No hay eventos detectados'];
+
         const text = [
-          'Muestras: ' + data.samples,
-          'PARO total (s): ' + data.overall.stoppedSeconds,
-          'BAJA velocidad total (s): ' + data.overall.lowSpeedSeconds,
-          'Velocidad prom: ' + data.overall.avgSpeed,
-          'Velocidad min/max: ' + data.overall.minSpeed + ' / ' + data.overall.maxSpeed,
+          'Dia: ' + data.day,
+          'Velocidad promedio del dia: ' + data.summary.avgSpeed,
+          'Paro total (s): ' + data.summary.stoppedSeconds,
+          'Baja velocidad total (s): ' + data.summary.lowSpeedSeconds,
           '',
-          'Detalle por maquina:',
-          ...data.byMachine.map(m => 'D' + m.address + ' -> paro=' + m.stoppedSeconds + 's, baja=' + m.lowSpeedSeconds + 's, avg=' + m.avgSpeed)
+          'Promedio por hora:',
+          ...hourlyLines,
+          '',
+          'Eventos aproximados:',
+          ...eventLines,
         ].join('\n');
         setStatus('statusAnalysis', text, true);
       } catch (err) {
@@ -276,9 +282,7 @@ export class WebController {
     };
 
     const now = new Date();
-    const before = new Date(now.getTime() - 8 * 3600 * 1000);
-    document.getElementById('to').value = now.toISOString().slice(0, 16);
-    document.getElementById('from').value = before.toISOString().slice(0, 16);
+    document.getElementById('day').value = now.toISOString().slice(0, 10);
 
     timer = setInterval(readAll, 2000);
     readAll();

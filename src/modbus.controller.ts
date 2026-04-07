@@ -146,7 +146,18 @@ export class ModbusController {
   }
 
   @Get('analysis')
-  async analysis(@Query('from') from?: string, @Query('to') to?: string) {
+  async analysis(@Query('from') from?: string, @Query('to') to?: string, @Query('day') day?: string) {
+    if (day && day.trim() !== '') {
+      try {
+        return await this.storage.analyzeDayByHours(day.trim());
+      } catch (error) {
+        throw new HttpException(
+          `No se pudo analizar el dia: ${(error as Error).message}`,
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const fromEpoch = parseEpochInput(from, now - 12 * 3600);
     const toEpoch = parseEpochInput(to, now);
@@ -156,5 +167,17 @@ export class ModbusController {
     }
 
     return this.storage.analyzeInterval(fromEpoch, toEpoch);
+  }
+
+  @Get('analysis-day')
+  async analysisDay(@Query('day') day?: string) {
+    try {
+      return await this.storage.analyzeDayByHours(day);
+    } catch (error) {
+      throw new HttpException(
+        `No se pudo analizar el dia: ${(error as Error).message}`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
   }
 }
