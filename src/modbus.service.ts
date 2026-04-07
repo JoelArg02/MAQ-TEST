@@ -32,6 +32,27 @@ export class ModbusService {
     }
   }
 
+  private async resetConnection(): Promise<void> {
+    if (this.client.isOpen) {
+      try {
+        await this.client.close();
+      } catch {
+        // Ignorar errores al cerrar para permitir reconexion limpia.
+      }
+    }
+  }
+
+  private async withReconnect<T>(fn: () => Promise<T>): Promise<T> {
+    await this.ensureConnected();
+    try {
+      return await fn();
+    } catch {
+      await this.resetConnection();
+      await this.ensureConnected();
+      return await fn();
+    }
+  }
+
   private encodeUInt32WordSwap(value: number): [number, number] {
     const highWord = (value >>> 16) & 0xffff;
     const lowWord = value & 0xffff;
@@ -63,13 +84,11 @@ export class ModbusService {
 
   async readAll() {
     return this.runQueued(async () => {
-      await this.ensureConnected();
-
       const values: SnapshotValue[] = [];
 
       for (const item of LECTURAS) {
         try {
-          const response = await this.client.readHoldingRegisters(item.address, 2);
+          const response = await this.withReconnect(() => this.client.readHoldingRegisters(item.address, 2));
           const regs = response.data;
           const value =
             item.type === 'float32'
@@ -119,9 +138,8 @@ export class ModbusService {
     const rounded = Number(value.toFixed(2));
 
     return this.runQueued(async () => {
-      await this.ensureConnected();
       const payload = this.encodeFloat32WordSwap(rounded);
-      await this.client.writeRegisters(target.address, payload);
+      await this.withReconnect(() => this.client.writeRegisters(target.address, payload));
 
       return {
         ok: true,
@@ -145,9 +163,8 @@ export class ModbusService {
     }
 
     return this.runQueued(async () => {
-      await this.ensureConnected();
       const payload = this.encodeUInt32WordSwap(value >>> 0);
-      await this.client.writeRegisters(target.address, payload);
+      await this.withReconnect(() => this.client.writeRegisters(target.address, payload));
 
       return {
         ok: true,
@@ -161,11 +178,9 @@ export class ModbusService {
 
   async resetAllPulsos() {
     return this.runQueued(async () => {
-      await this.ensureConnected();
-
       for (const target of Object.values(PULSOS)) {
         const payload = this.encodeUInt32WordSwap(0);
-        await this.client.writeRegisters(target.address, payload);
+        await this.withReconnect(() => this.client.writeRegisters(target.address, payload));
       }
 
       return {
@@ -185,10 +200,9 @@ export class ModbusService {
     }
 
     return this.runQueued(async () => {
-      await this.ensureConnected();
-      await this.client.writeCoil(coil, true);
+      await this.withReconnect(() => this.client.writeCoil(coil, true));
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      await this.client.writeCoil(coil, false);
+      await this.withReconnect(() => this.client.writeCoil(coil, false));
 
       return {
         ok: true,
@@ -200,8 +214,6 @@ export class ModbusService {
   }
 
   async close(): Promise<void> {
-    if (this.client.isOpen) {
-      await this.client.close();
-    }
+    await this.resetConnection();
   }
 }

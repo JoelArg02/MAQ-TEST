@@ -16,7 +16,9 @@ export class LoggerService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     await this.storageService.markEvent('SYSTEM_START', 'Inicio del servidor y logger automatico');
-    await this.captureNow();
+    setTimeout(() => {
+      void this.captureNow();
+    }, 0);
 
     this.timer = setInterval(() => {
       void this.captureNow();
