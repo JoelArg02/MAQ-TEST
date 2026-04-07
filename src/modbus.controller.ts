@@ -212,16 +212,4 @@ export class ModbusController {
       );
     }
   }
-
-  @Get('anomalies')
-  async anomalies(@Query('day') day?: string) {
-    try {
-      return await this.storage.getAnomalies(day);
-    } catch (error) {
-      throw new HttpException(
-        `No se pudo obtener anomalias: ${(error as Error).message}`,
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-  }
 }

@@ -7,10 +7,8 @@ export class WebController {
   appScript() {
     return `const liveRows = document.getElementById('liveRows');
 const analysisRows = document.getElementById('analysisRows');
-const anomalyRows = document.getElementById('anomalyRows');
 const statusLive = document.getElementById('statusLive');
 const statusAnalysis = document.getElementById('statusAnalysis');
-const statusAnomalies = document.getElementById('statusAnomalies');
 const statusReset = document.getElementById('statusReset');
 const dayInput = document.getElementById('day');
 
@@ -48,19 +46,6 @@ function qualityClass(pct) {
   if (pct >= 85) return 'q-high';
   if (pct >= 60) return 'q-mid';
   return 'q-low';
-}
-
-function severityClass(sev) {
-  if (sev === 'CRITICA') return 'sev-crit';
-  if (sev === 'ALTA') return 'sev-high';
-  return 'sev-mid';
-}
-
-function anomalyTypeLabel(t) {
-  if (t === 'PICO_VELOCIDAD') return 'Pico de velocidad';
-  if (t === 'CAIDA_VELOCIDAD') return 'Caida de velocidad';
-  if (t === 'PARO_ANOMALO') return 'Paro anomalo';
-  return t;
 }
 
 function renderLive(values) {
@@ -120,43 +105,8 @@ async function loadAnalysis() {
   }
 }
 
-async function loadAnomalies() {
-  const q = new URLSearchParams();
-  if (dayInput.value) q.set('day', dayInput.value);
-
-  try {
-    const data = await fetchJson('/api/anomalies?' + q.toString());
-    anomalyRows.innerHTML = '';
-
-    if (data.total === 0) {
-      setText(statusAnomalies, 'Sin anomalias detectadas para ' + data.day, true);
-      return;
-    }
-
-    anomalyRows.innerHTML = data.anomalies.map((a) =>
-      '<tr>' +
-        '<td>' + a.time + '</td>' +
-        '<td>' + a.machine + '</td>' +
-        '<td>' + anomalyTypeLabel(a.anomaly_type) + '</td>' +
-        '<td><span class="severity ' + severityClass(a.severity) + '">' + a.severity + '</span></td>' +
-        '<td>' + Number(a.z_score).toFixed(2) + 'σ</td>' +
-        '<td>' + Number(a.speed_observed).toFixed(3) + '</td>' +
-        '<td>' + Number(a.speed_ewma).toFixed(3) + '</td>' +
-        '<td class="detail-cell">' + (a.details || '') + '</td>' +
-      '</tr>'
-    ).join('');
-
-    const criticas = data.anomalies.filter((a) => a.severity === 'CRITICA').length;
-    const altas = data.anomalies.filter((a) => a.severity === 'ALTA').length;
-    setText(statusAnomalies, 'Total: ' + data.total + ' | Criticas: ' + criticas + ' | Altas: ' + altas + ' | Dia: ' + data.day, criticas === 0);
-  } catch (err) {
-    anomalyRows.innerHTML = '';
-    setText(statusAnomalies, 'Error anomalias: ' + err.message, false);
-  }
-}
-
 async function refreshAll() {
-  await Promise.all([loadLive(), loadAnalysis(), loadAnomalies()]);
+  await Promise.all([loadLive(), loadAnalysis()]);
 }
 
 async function resetMachine(id) {
@@ -228,11 +178,6 @@ timer = setInterval(refreshAll, 1000);
     .q-high { background: #dcfce7; color: #166534; }
     .q-mid { background: #fef9c3; color: #854d0e; }
     .q-low { background: #fee2e2; color: #991b1b; }
-    .severity { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 0.82rem; }
-    .sev-crit { background: #991b1b; color: #fff; }
-    .sev-high { background: #ea580c; color: #fff; }
-    .sev-mid { background: #fef9c3; color: #854d0e; }
-    .detail-cell { font-size: 0.78rem; color: #6b7280; max-width: 300px; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -283,28 +228,6 @@ timer = setInterval(refreshAll, 1000);
             </tr>
           </thead>
           <tbody id="analysisRows"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Anomalias Detectadas (Z-score robusto)</h2>
-      <div id="statusAnomalies" class="status">Sin anomalias</div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Hora</th>
-              <th>Maquina</th>
-              <th>Tipo</th>
-              <th>Severidad</th>
-              <th>Z-score</th>
-              <th>Vel observada</th>
-              <th>Vel referencia (EWMA)</th>
-              <th>Detalle</th>
-            </tr>
-          </thead>
-          <tbody id="anomalyRows"></tbody>
         </table>
       </div>
     </div>

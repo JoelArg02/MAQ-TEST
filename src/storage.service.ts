@@ -157,24 +157,6 @@ export class StorageService implements OnModuleInit {
         event_type TEXT NOT NULL,
         details TEXT
       );
-
-      CREATE TABLE IF NOT EXISTS anomalies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        detected_at TEXT NOT NULL,
-        epoch_seconds INTEGER NOT NULL,
-        address INTEGER NOT NULL,
-        machine TEXT NOT NULL,
-        anomaly_type TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        speed_observed REAL NOT NULL,
-        speed_ewma REAL NOT NULL,
-        z_score REAL NOT NULL,
-        sigma_mad REAL NOT NULL,
-        details TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_anomalies_epoch ON anomalies(epoch_seconds);
-      CREATE INDEX IF NOT EXISTS idx_anomalies_addr ON anomalies(address, epoch_seconds);
     `);
       })();
     }
@@ -652,19 +634,6 @@ export class StorageService implements OnModuleInit {
       return `${String(d.getHours()).padStart(2, '0')}:00`;
     };
 
-    const pendingAnomalies: Array<{
-      epoch_seconds: number;
-      address: number;
-      machine: string;
-      anomaly_type: string;
-      severity: string;
-      speed_observed: number;
-      speed_ewma: number;
-      z_score: number;
-      sigma_mad: number;
-      details: string;
-    }> = [];
-
     const allRows: Array<{
       hour: string;
       machine: string;
@@ -820,81 +789,6 @@ export class StorageService implements OnModuleInit {
 
       const hourly = [...byHour.values()].sort((a, b) => a.hour.localeCompare(b.hour));
 
-      // --- Detección de anomalías con Z-score robusto (MAD) ---
-      // Recopila velocidades productivas para estadística robusta
-      const productiveSpeeds: number[] = [];
-      for (const iv of intervals) {
-        if (!iv.isReset && iv.adjustedDelta > 0 && iv.dt > 0) {
-          productiveSpeeds.push(iv.adjustedDelta / iv.dt);
-        }
-      }
-
-      if (productiveSpeeds.length >= 10) {
-        const sortedSpeeds = [...productiveSpeeds].sort((a, b) => a - b);
-        const pctSpeed = (arr: number[], p: number) => {
-          const idx = (p / 100) * (arr.length - 1);
-          const lo = Math.floor(idx);
-          const hi = Math.ceil(idx);
-          return lo === hi ? arr[lo] : arr[lo] * (hi - idx) + arr[hi] * (idx - lo);
-        };
-        const medianSpeed = pctSpeed(sortedSpeeds, 50);
-        const speedDeviations = sortedSpeeds.map((s) => Math.abs(s - medianSpeed)).sort((a, b) => a - b);
-        const madSpeed = pctSpeed(speedDeviations, 50);
-        const sigmaSpeed = madSpeed * 1.4826;
-
-        // Segundo pase con EWMA para detección contextual
-        const Z_THRESHOLD = 3; // 99.7% bajo normalidad
-        let ewma2 = 0;
-        let ewma2Init = false;
-
-        for (const iv of intervals) {
-          if (iv.isReset || iv.dt <= 0) continue;
-          const speed = iv.adjustedDelta / iv.dt;
-
-          if (iv.adjustedDelta > 0) {
-            if (!ewma2Init) { ewma2 = speed; ewma2Init = true; }
-            else { ewma2 = 0.3 * speed + 0.7 * ewma2; }
-          }
-
-          if (sigmaSpeed <= 0) continue;
-
-          // Z-score vs mediana global (detección estática)
-          const zGlobal = Math.abs(speed - medianSpeed) / sigmaSpeed;
-          // Z-score vs EWMA contextual (detección dinámica)
-          const zEwma = ewma2Init ? Math.abs(speed - ewma2) / sigmaSpeed : 0;
-          // Tomar el más alto de ambos
-          const zScore = Math.max(zGlobal, zEwma);
-
-          if (zScore >= Z_THRESHOLD) {
-            const severity =
-              zScore >= 5 ? 'CRITICA' :
-              zScore >= 4 ? 'ALTA' : 'MEDIA';
-
-            const anomalyType =
-              speed > medianSpeed ? 'PICO_VELOCIDAD' :
-              speed < medianSpeed && speed > 0 ? 'CAIDA_VELOCIDAD' : 'PARO_ANOMALO';
-
-            const ref = ewma2Init ? ewma2 : medianSpeed;
-            const detail =
-              `Velocidad ${speed.toFixed(3)} vs referencia ${ref.toFixed(3)} ` +
-              `(z=${zScore.toFixed(2)}, σ̂=${sigmaSpeed.toFixed(4)}, mediana=${medianSpeed.toFixed(3)})`;
-
-            pendingAnomalies.push({
-              epoch_seconds: iv.from,
-              address: machine.address,
-              machine: machine.machine,
-              anomaly_type: anomalyType,
-              severity,
-              speed_observed: speed,
-              speed_ewma: ewma2Init ? ewma2 : medianSpeed,
-              z_score: zScore,
-              sigma_mad: sigmaSpeed,
-              details: detail,
-            });
-          }
-        }
-      }
-
       for (let i = 0; i < hourly.length; i++) {
         const current = hourly[i];
         const avgSpeed = current.runningSeconds > 0 ? current.weightedSpeed / current.runningSeconds : 0;
@@ -984,40 +878,6 @@ export class StorageService implements OnModuleInit {
       return a.machine.localeCompare(b.machine);
     });
 
-    // Persistir anomalías detectadas (upsert por epoch+address para no duplicar)
-    if (pendingAnomalies.length > 0) {
-      await this.db.exec('BEGIN');
-      try {
-        for (const a of pendingAnomalies) {
-          const exists = await this.db.get(
-            `SELECT id FROM anomalies WHERE epoch_seconds = ? AND address = ?`,
-            a.epoch_seconds,
-            a.address,
-          );
-          if (!exists) {
-            await this.db.run(
-              `INSERT INTO anomalies(detected_at, epoch_seconds, address, machine, anomaly_type, severity, speed_observed, speed_ewma, z_score, sigma_mad, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              new Date().toISOString(),
-              a.epoch_seconds,
-              a.address,
-              a.machine,
-              a.anomaly_type,
-              a.severity,
-              a.speed_observed,
-              a.speed_ewma,
-              a.z_score,
-              a.sigma_mad,
-              a.details,
-            );
-          }
-        }
-        await this.db.exec('COMMIT');
-      } catch (err) {
-        await this.db.exec('ROLLBACK');
-      }
-    }
-
     return {
       day: dayStart.toISOString().slice(0, 10),
       fromEpoch,
@@ -1037,43 +897,6 @@ export class StorageService implements OnModuleInit {
         'trend',
       ],
       rows: allRows,
-      anomaliesDetected: pendingAnomalies.length,
-    };
-  }
-
-  async getAnomalies(dayInput?: string) {
-    await this.ensureReady();
-
-    const baseDate = dayInput ? new Date(`${dayInput}T00:00:00`) : new Date();
-    if (Number.isNaN(baseDate.getTime())) {
-      throw new Error(`Fecha invalida: ${dayInput}`);
-    }
-
-    const dayStart = new Date(baseDate);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(dayStart);
-    dayEnd.setHours(23, 59, 59, 999);
-
-    const fromEpoch = Math.floor(dayStart.getTime() / 1000);
-    const toEpoch = Math.floor(dayEnd.getTime() / 1000);
-
-    const rows = await this.db.all(
-      `SELECT id, detected_at, epoch_seconds, address, machine, anomaly_type, severity,
-              speed_observed, speed_ewma, z_score, sigma_mad, details
-       FROM anomalies
-       WHERE epoch_seconds BETWEEN ? AND ?
-       ORDER BY epoch_seconds DESC, severity DESC`,
-      fromEpoch,
-      toEpoch,
-    );
-
-    return {
-      day: dayStart.toISOString().slice(0, 10),
-      total: rows.length,
-      anomalies: rows.map((r: any) => ({
-        ...r,
-        time: new Date(r.epoch_seconds * 1000).toLocaleTimeString(),
-      })),
     };
   }
 }
