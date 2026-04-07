@@ -16,6 +16,7 @@ export class WebController {
 
 const rows = document.getElementById('rows');
 const plcInfo = document.getElementById('plcInfo');
+const analysisRows = document.getElementById('analysisRows');
 let timer = null;
 
 function setStatus(id, text, ok = true) {
@@ -103,37 +104,41 @@ document.getElementById('btnAnalysis').onclick = async () => {
   if (day) q.set('day', day);
 
   try {
-    const res = await fetch('/api/analysis-day?' + q.toString());
+    const res = await fetch('/api/analysis-day-table?' + q.toString());
     const data = await res.json();
     if (!res.ok) throw new Error(data.message || 'Error');
+
+    analysisRows.innerHTML = '';
 
     if (data.noData) {
       setStatus('statusAnalysis', 'No hay datos', true);
       return;
     }
 
-    const hourlyLines = data.hourly.length > 0
-      ? data.hourly.map(h => h.hour + ' -> prom=' + h.avgSpeed + ', paro=' + h.stoppedSeconds + 's, baja=' + h.lowSpeedSeconds + 's')
-      : ['No hay datos'];
+    const trendText = (trend) => {
+      if (trend === 'PARO') return 'Parada';
+      if (trend === 'BAJO_VELOCIDAD') return 'Bajo velocidad';
+      if (trend === 'SUBIO_VELOCIDAD') return 'Subio velocidad';
+      if (trend === 'ESTABLE') return 'Estable';
+      return 'Sin referencia';
+    };
 
-    const eventLines = data.events.length > 0
-      ? data.events.map(e => e.approxTime + ' [' + e.type + '] ' + e.detail)
-      : ['No hay eventos detectados'];
+    const speedLabel = (row) => row.avgSpeed + ' ' + row.unit + '/s';
+    const machineLabel = (row) => row.machine + ' (' + row.unit + ')';
 
-    const text = [
-      'Dia: ' + data.day,
-      'Velocidad promedio del dia: ' + data.summary.avgSpeed,
-      'Paro total (s): ' + data.summary.stoppedSeconds,
-      'Baja velocidad total (s): ' + data.summary.lowSpeedSeconds,
-      '',
-      'Promedio por hora:',
-      ...hourlyLines,
-      '',
-      'Eventos aproximados:',
-      ...eventLines,
-    ].join('\\n');
-    setStatus('statusAnalysis', text, true);
+    analysisRows.innerHTML = data.rows.map((row) =>
+      '<tr>' +
+        '<td>' + row.hour + '</td>' +
+        '<td>' + machineLabel(row) + '</td>' +
+        '<td>' + speedLabel(row) + '</td>' +
+        '<td>' + row.stoppedSeconds + ' s</td>' +
+        '<td>' + trendText(row.trend) + '</td>' +
+      '</tr>'
+    ).join('');
+
+    setStatus('statusAnalysis', 'Filas: ' + data.rows.length + ' | Dia: ' + data.day, true);
   } catch (err) {
+    analysisRows.innerHTML = '';
     setStatus('statusAnalysis', 'Error: ' + err.message, false);
   }
 };
@@ -230,6 +235,13 @@ readAll();
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 0.88rem; }
     th { background: #f8fafc; }
+    .analysis-wrap {
+      overflow-x: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      margin-top: 8px;
+      background: #ffffff;
+    }
   </style>
 </head>
 <body>
@@ -288,6 +300,20 @@ readAll();
           <button id="btnAnalysis" class="alt">Analizar</button>
         </div>
         <div id="statusAnalysis" class="status">Sin datos</div>
+        <div class="analysis-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Horas</th>
+                <th>Maquina</th>
+                <th>Vel promedio (hora)</th>
+                <th>Tiempo parado</th>
+                <th>Tendencia vs horas anteriores</th>
+              </tr>
+            </thead>
+            <tbody id="analysisRows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
