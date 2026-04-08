@@ -60,7 +60,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
         'Content-Type': 'application/json',
         'X-Api-Key': KEY_BACK,
       },
-      body: JSON.stringify({ batchId, capturedAt: new Date().toLocaleString('sv-SE', { timeZone: 'America/Guayaquil' }), readings, events: [] }),
+      body: JSON.stringify({ batchId, capturedAt: new Date().toISOString(), readings, events: [] }),
     });
 
     if (!res.ok) {
