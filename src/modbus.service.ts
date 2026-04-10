@@ -1,6 +1,14 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import ModbusRTU from 'modbus-serial';
-import { IP_PLC, PLC_PORT, PLC_SLAVE_ID, PLC_TIMEOUT_MS } from './config';
+import {
+  IP_PLC,
+  MODBUS_CONNECT_HOST,
+  MODBUS_CONNECT_PORT,
+  PLC_PORT,
+  PLC_SLAVE_ID,
+  PLC_TIMEOUT_MS,
+  USE_MODBUS_PROXY,
+} from './config';
 import { LECTURAS, M_MAP, PERIMETROS, PULSOS, ValueType } from './modbus-map';
 
 export type SnapshotValue = {
@@ -30,7 +38,14 @@ export class ModbusService {
   }));
 
   /** Objeto de respuesta del PLC — preallocado, se muta */
-  private readonly plcInfo = Object.freeze({ ip: IP_PLC, port: PLC_PORT, slaveId: PLC_SLAVE_ID });
+  private readonly plcInfo = Object.freeze({
+    ip: IP_PLC,
+    port: PLC_PORT,
+    slaveId: PLC_SLAVE_ID,
+    viaProxy: USE_MODBUS_PROXY,
+    routeHost: MODBUS_CONNECT_HOST,
+    routePort: MODBUS_CONNECT_PORT,
+  });
   private readonly snapshotResult = {
     plc: this.plcInfo,
     timestamp: '',
@@ -54,7 +69,7 @@ export class ModbusService {
 
   private async ensureConnected(): Promise<void> {
     if (!this.client.isOpen) {
-      await this.client.connectTCP(IP_PLC, { port: PLC_PORT });
+      await this.client.connectTCP(MODBUS_CONNECT_HOST, { port: MODBUS_CONNECT_PORT });
       this.client.setID(PLC_SLAVE_ID);
       this.client.setTimeout(PLC_TIMEOUT_MS);
     }
