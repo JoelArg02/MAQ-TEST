@@ -109,7 +109,7 @@ export class ModbusController {
     try {
       const response = await this.modbus.resetAllPulsos();
       await this.storage.markEvent('RESET_ALL_PULSOS_START', JSON.stringify(response));
-      await this.logger.captureNow();
+      await this.logger.captureNow({ ensure: true });
       return {
         ...response,
         message: 'Pulsos reseteados. Registro continuo iniciado desde este punto.',
@@ -131,7 +131,7 @@ export class ModbusController {
       const plcResult = await this.modbus.resetAllPulsos();
       const dbResult = await this.storage.clearAllData();
       await this.storage.markEvent('FULL_RESET', JSON.stringify({ plcResult, dbResult }));
-      await this.logger.captureNow();
+      await this.logger.captureNow({ ensure: true });
       return {
         ok: true,
         message: 'Reset completo: PLC (D1000-D1061 en bloque) y base de datos limpiados.',
