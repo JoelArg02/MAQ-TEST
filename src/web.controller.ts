@@ -34,22 +34,8 @@ async function fetchJson(url, options) {
 
 function trendLabel(trend) {
   if (trend === 'PARO') return 'Parada';
-  if (trend === 'BAJO_VELOCIDAD') return 'Baja velocidad';
-  if (trend === 'SUBIO_VELOCIDAD') return 'Subio velocidad';
-  if (trend === 'ESTABLE') return 'Estable';
+  if (trend === 'PRODUCIENDO') return 'Produciendo';
   return 'Sin referencia';
-}
-
-function qualityLabel(pct) {
-  if (pct >= 85) return 'Alta';
-  if (pct >= 60) return 'Media';
-  return 'Baja';
-}
-
-function qualityClass(pct) {
-  if (pct >= 85) return 'q-high';
-  if (pct >= 60) return 'q-mid';
-  return 'q-low';
 }
 
 function renderLive(values) {
@@ -93,16 +79,11 @@ async function loadAnalysis() {
         '<td>' + r.avgSpeed + ' ' + r.unit + '/s</td>' +
         '<td>' + r.productionInHour + ' ' + r.unit + '</td>' +
         '<td>' + r.stoppedSeconds + ' s</td>' +
-        '<td><span class="quality ' + qualityClass(r.dataQualityPct || 0) + '">' + qualityLabel(r.dataQualityPct || 0) + ' (' + (r.dataQualityPct || 0) + '%)</span></td>' +
         '<td>' + trendLabel(r.trend) + '</td>' +
       '</tr>'
     ).join('');
 
-    const avgQuality = data.rows.length > 0
-      ? (data.rows.reduce((sum, row) => sum + (row.dataQualityPct || 0), 0) / data.rows.length).toFixed(1)
-      : '0.0';
-
-    setText(statusAnalysis, 'Filas: ' + data.rows.length + ' | Dia: ' + data.day + ' | Calidad prom: ' + avgQuality + '%', true);
+    setText(statusAnalysis, 'Filas: ' + data.rows.length + ' | Dia: ' + data.day, true);
   } catch (err) {
     analysisRows.innerHTML = '';
     setText(statusAnalysis, 'Error analisis: ' + err.message, false);
@@ -208,10 +189,6 @@ startAuto();
     th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; font-size: 0.9rem; }
     th { background: #f9fafb; }
     .table-wrap { overflow-x: auto; }
-    .quality { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 0.82rem; }
-    .q-high { background: #dcfce7; color: #166534; }
-    .q-mid { background: #fef9c3; color: #854d0e; }
-    .q-low { background: #fee2e2; color: #991b1b; }
     .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
     .modal { background: #fff; border-radius: 12px; padding: 24px; max-width: 420px; width: 90%; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,0.25); }
     .modal h3 { margin: 0 0 12px; color: #991b1b; }
@@ -253,7 +230,7 @@ startAuto();
     <div id="resetModal" class="modal-bg">
       <div class="modal">
         <h3>Confirmar Reset Completo</h3>
-        <p>Esto va a resetear los pulsos de TODAS las maquinas (D1000-D1060) y borrar TODOS los datos de la base de datos (lecturas, eventos, anomalias).<br><br><strong>Esta accion no se puede deshacer.</strong></p>
+        <p>Esto va a resetear los pulsos de TODAS las maquinas (D1000-D1060) y borrar TODOS los datos de la base de datos (lecturas y eventos).<br><br><strong>Esta accion no se puede deshacer.</strong></p>
         <div class="modal-btns">
           <button id="modalCancel" class="gray">Cancelar</button>
           <button id="modalConfirm" class="warn">Si, resetear todo</button>
@@ -277,8 +254,7 @@ startAuto();
               <th>Vel promedio (hora)</th>
               <th>Produccion en la hora</th>
               <th>Tiempo parado</th>
-              <th>Calidad de datos</th>
-              <th>Tendencia vs horas anteriores</th>
+              <th>Estado</th>
             </tr>
           </thead>
           <tbody id="analysisRows"></tbody>

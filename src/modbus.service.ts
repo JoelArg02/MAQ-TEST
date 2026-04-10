@@ -14,6 +14,29 @@ export type SnapshotValue = {
 export class ModbusService {
   private readonly client = new ModbusRTU();
   private queue: Promise<unknown> = Promise.resolve();
+  /** Buffer reutilizable para encode/decode float32 — evita alloc por cada lectura */
+  private readonly fBuf = Buffer.allocUnsafe(4);
+
+  /**
+   * Pool de objetos SnapshotValue preallocados — uno por cada LECTURA.
+   * Se mutan en lugar de crear objetos nuevos cada segundo.
+   * Esto elimina ~17 objetos × 1/s = 1,020 objetos/min del GC.
+   */
+  private readonly valuePool: SnapshotValue[] = LECTURAS.map((item) => ({
+    address: item.address,
+    name: item.name,
+    type: item.type,
+    value: 0,
+  }));
+
+  /** Objeto de respuesta del PLC — preallocado, se muta */
+  private readonly plcInfo = Object.freeze({ ip: IP_PLC, port: PLC_PORT, slaveId: PLC_SLAVE_ID });
+  private readonly snapshotResult = {
+    plc: this.plcInfo,
+    timestamp: '',
+    epochSeconds: 0,
+    values: this.valuePool,
+  };
 
   private async runQueued<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
@@ -66,61 +89,36 @@ export class ModbusService {
   }
 
   private encodeFloat32WordSwap(value: number): [number, number] {
-    const buffer = Buffer.allocUnsafe(4);
-    buffer.writeFloatBE(value, 0);
-    const highWord = buffer.readUInt16BE(0);
-    const lowWord = buffer.readUInt16BE(2);
-    return [lowWord, highWord];
+    this.fBuf.writeFloatBE(value, 0);
+    return [this.fBuf.readUInt16BE(2), this.fBuf.readUInt16BE(0)];
   }
 
   private decodeFloat32WordSwap(registers: number[]): number {
-    const lowWord = registers[0] & 0xffff;
-    const highWord = registers[1] & 0xffff;
-    const buffer = Buffer.allocUnsafe(4);
-    buffer.writeUInt16BE(highWord, 0);
-    buffer.writeUInt16BE(lowWord, 2);
-    return Number(buffer.readFloatBE(0).toFixed(2));
+    this.fBuf.writeUInt16BE(registers[1] & 0xffff, 0);
+    this.fBuf.writeUInt16BE(registers[0] & 0xffff, 2);
+    return Math.round(this.fBuf.readFloatBE(0) * 100) / 100;
   }
 
   async readAll() {
     return this.runQueued(async () => {
-      const values: SnapshotValue[] = [];
-
-      for (const item of LECTURAS) {
+      for (let i = 0; i < LECTURAS.length; i++) {
+        const item = LECTURAS[i];
+        const slot = this.valuePool[i];
         try {
           const response = await this.withReconnect(() => this.client.readHoldingRegisters(item.address, 2));
           const regs = response.data;
-          const value =
-            item.type === 'float32'
-              ? this.decodeFloat32WordSwap(regs)
-              : this.decodeUInt32WordSwap(regs);
-
-          values.push({
-            address: item.address,
-            name: item.name,
-            type: item.type,
-            value,
-          });
+          slot.value = item.type === 'float32'
+            ? this.decodeFloat32WordSwap(regs)
+            : this.decodeUInt32WordSwap(regs);
         } catch {
-          values.push({
-            address: item.address,
-            name: item.name,
-            type: item.type,
-            value: 'ERROR_COM',
-          });
+          slot.value = 'ERROR_COM';
         }
       }
 
-      return {
-        plc: {
-          ip: IP_PLC,
-          port: PLC_PORT,
-          slaveId: PLC_SLAVE_ID,
-        },
-        timestamp: new Date().toISOString(),
-        epochSeconds: Math.floor(Date.now() / 1000),
-        values,
-      };
+      const now = Date.now();
+      this.snapshotResult.timestamp = new Date(now).toISOString();
+      this.snapshotResult.epochSeconds = (now / 1000) | 0;
+      return this.snapshotResult;
     });
   }
 

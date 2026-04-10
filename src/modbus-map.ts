@@ -61,5 +61,3 @@ export const M_MAP: Record<string, number> = {
   m5: 5,
   m6: 6,
 };
-
-export const PULSE_ADDRESSES = Object.values(PULSOS).map((x) => x.address);
