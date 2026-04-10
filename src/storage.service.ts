@@ -2,44 +2,47 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Database, open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { DB_FILE, HEARTBEAT_INTERVAL_S } from './config';
+import { LECTURAS } from './modbus-map';
 import type { SnapshotValue } from './modbus.service';
 
 // ─── Constantes inmutables ─────────────────────────────────────────────────────
 // Typed arrays: sin overhead de objetos JS, layout contiguo en memoria.
 
 /** Direcciones de producción como Int16Array — búsqueda O(1) vía Set, iteración vía array */
-const PROD_ADDR = Int16Array.from([1100, 1110, 1120, 1030, 1040, 1050, 1060]);
-const PROD_ADDR_SET = new Set(PROD_ADDR);
+const PROD_ADDR = Int16Array.from([1000, 1010, 1020, 1030, 1040, 1050, 1060, 1100, 1110, 1120]);
 
-/** Mapa address → índice (0..6) para acceso directo en Float64Array */
+/** Mapa address → índice para acceso directo en Float64Array */
 const ADDR_IDX = new Map<number, number>();
 for (let i = 0; i < PROD_ADDR.length; i++) ADDR_IDX.set(PROD_ADDR[i], i);
 
 /** Número de máquinas de producción */
-const N = PROD_ADDR.length; // 7
+const N = PROD_ADDR.length; // 10
 
 /** Info estática por máquina — strings interned (una sola referencia en memoria) */
 const MACHINE_INFO: ReadonlyArray<{
   address: number;
   machine: string;
   machineType: 'TELAR' | 'CORTADORA';
-  unit: 'metros' | 'costales';
+  unit: 'metros' | 'costales' | 'pulsos';
 }> = Object.freeze([
-  { address: 1100, machine: 'Telar 1', machineType: 'TELAR', unit: 'metros' },
-  { address: 1110, machine: 'Telar 2', machineType: 'TELAR', unit: 'metros' },
-  { address: 1120, machine: 'Telar 3', machineType: 'TELAR', unit: 'metros' },
+  { address: 1000, machine: 'Pulsos Telar 1', machineType: 'TELAR', unit: 'pulsos' },
+  { address: 1010, machine: 'Pulsos Telar 2', machineType: 'TELAR', unit: 'pulsos' },
+  { address: 1020, machine: 'Pulsos Telar 3', machineType: 'TELAR', unit: 'pulsos' },
   { address: 1030, machine: 'Cortadora 1', machineType: 'CORTADORA', unit: 'costales' },
   { address: 1040, machine: 'Cortadora 2', machineType: 'CORTADORA', unit: 'costales' },
   { address: 1050, machine: 'Cortadora 3', machineType: 'CORTADORA', unit: 'costales' },
   { address: 1060, machine: 'Cortadora 4', machineType: 'CORTADORA', unit: 'costales' },
+  { address: 1100, machine: 'Metros Tejidos T1', machineType: 'TELAR', unit: 'metros' },
+  { address: 1110, machine: 'Metros Tejidos T2', machineType: 'TELAR', unit: 'metros' },
+  { address: 1120, machine: 'Metros Tejidos T3', machineType: 'TELAR', unit: 'metros' },
 ]);
 
 /** Nombre por address — lookup directo, evita recorrer LECTURAS */
 const ADDR_NAME = new Map<number, string>();
 const ADDR_TYPE = new Map<number, string>();
-for (const m of MACHINE_INFO) {
-  ADDR_NAME.set(m.address, m.machine);
-  ADDR_TYPE.set(m.address, m.machineType === 'TELAR' ? 'float32' : 'int32');
+for (const item of LECTURAS) {
+  ADDR_NAME.set(item.address, item.name);
+  ADDR_TYPE.set(item.address, item.type);
 }
 
 // ─── Servicio ──────────────────────────────────────────────────────────────────
@@ -62,9 +65,6 @@ export class StorageService implements OnModuleInit {
   /** Caché del análisis (un solo objeto, TTL 30s) */
   private analysisCache: { key: string; data: unknown; ts: number } | null = null;
   private readonly CACHE_TTL = 30_000;
-
-  /** Prepared statement reutilizable para INSERT de 7 filas */
-  private insertStmt: ReturnType<Database['prepare']> | null = null;
 
   // ─── Init ──────────────────────────────────────────────────────────────────
 
@@ -490,7 +490,7 @@ export class StorageService implements OnModuleInit {
       hour: string;
       machine: string;
       machineType: 'TELAR' | 'CORTADORA';
-      unit: 'metros' | 'costales';
+      unit: 'metros' | 'costales' | 'pulsos';
       avgSpeed: number;
       productionInHour: number;
       stoppedSeconds: number;

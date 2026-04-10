@@ -230,7 +230,7 @@ startAuto();
     <div id="resetModal" class="modal-bg">
       <div class="modal">
         <h3>Confirmar Reset Completo</h3>
-        <p>Esto va a resetear los pulsos de TODAS las maquinas (D1000-D1060) y borrar TODOS los datos de la base de datos (lecturas y eventos).<br><br><strong>Esta accion no se puede deshacer.</strong></p>
+        <p>Esto va a resetear los contadores de TODAS las maquinas (D1000-D1061 y D1100-D1121) y borrar TODOS los datos de la base de datos (lecturas y eventos).<br><br><strong>Esta accion no se puede deshacer.</strong></p>
         <div class="modal-btns">
           <button id="modalCancel" class="gray">Cancelar</button>
           <button id="modalConfirm" class="warn">Si, resetear todo</button>

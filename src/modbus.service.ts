@@ -38,6 +38,11 @@ export class ModbusService {
     values: this.valuePool,
   };
 
+  private readonly readBlocks = [
+    { from: 1000, to: 1061 },
+    { from: 1100, to: 1121 },
+  ] as const;
+
   private async runQueued<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
     this.queue = run.then(
@@ -99,19 +104,42 @@ export class ModbusService {
     return Math.round(this.fBuf.readFloatBE(0) * 100) / 100;
   }
 
+  private decodeByType(type: ValueType, regs: number[]): number {
+    return type === 'float32'
+      ? this.decodeFloat32WordSwap(regs)
+      : this.decodeUInt32WordSwap(regs);
+  }
+
+  private getItemsInRange(from: number, to: number): Array<{ index: number; address: number; type: ValueType }> {
+    const items: Array<{ index: number; address: number; type: ValueType }> = [];
+    for (let i = 0; i < LECTURAS.length; i++) {
+      const it = LECTURAS[i];
+      if (it.address >= from && it.address + 1 <= to) {
+        items.push({ index: i, address: it.address, type: it.type });
+      }
+    }
+    return items;
+  }
+
   async readAll() {
     return this.runQueued(async () => {
-      for (let i = 0; i < LECTURAS.length; i++) {
-        const item = LECTURAS[i];
-        const slot = this.valuePool[i];
+      for (const block of this.readBlocks) {
+        const items = this.getItemsInRange(block.from, block.to);
         try {
-          const response = await this.withReconnect(() => this.client.readHoldingRegisters(item.address, 2));
-          const regs = response.data;
-          slot.value = item.type === 'float32'
-            ? this.decodeFloat32WordSwap(regs)
-            : this.decodeUInt32WordSwap(regs);
+          const count = block.to - block.from + 1;
+          const response = await this.withReconnect(() => this.client.readHoldingRegisters(block.from, count));
+          const data = response.data;
+
+          for (let j = 0; j < items.length; j++) {
+            const item = items[j];
+            const offset = item.address - block.from;
+            const regs = [data[offset], data[offset + 1]];
+            this.valuePool[item.index].value = this.decodeByType(item.type, regs);
+          }
         } catch {
-          slot.value = 'ERROR_COM';
+          for (let j = 0; j < items.length; j++) {
+            this.valuePool[items[j].index].value = 'ERROR_COM';
+          }
         }
       }
 
@@ -192,6 +220,27 @@ export class ModbusService {
         blockStartAddress: firstAddress,
         blockEndAddress: lastAddress,
         totalRegisters,
+      };
+    });
+  }
+
+  async resetAllForFullReset() {
+    return this.runQueued(async () => {
+      const blocks = [
+        { from: 1000, to: 1061 },
+        { from: 1100, to: 1121 },
+      ] as const;
+
+      for (const block of blocks) {
+        const totalRegisters = block.to - block.from + 1;
+        const payload = new Array<number>(totalRegisters).fill(0);
+        await this.withReconnect(() => this.client.writeRegisters(block.from, payload));
+      }
+
+      return {
+        ok: true,
+        message: 'Reset en bloque aplicado a D1000-D1061 y D1100-D1121.',
+        resetBlocks: blocks,
       };
     });
   }

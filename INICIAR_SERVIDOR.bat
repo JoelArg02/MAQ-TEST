@@ -8,6 +8,17 @@ echo   Iniciando servidor MAQ-TEST...
 echo ======================================
 echo.
 
+echo [GIT] Descargando cambios del repositorio remoto...
+git fetch --all >nul 2>&1
+if errorlevel 1 (
+  echo [WARN] No se pudo conectar al repositorio remoto. Continuando con version local.
+) else (
+  for /f "tokens=*" %%b in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%b"
+  git reset --hard origin/%BRANCH% >nul 2>&1
+  echo [GIT] Repositorio sincronizado con origin/%BRANCH%.
+)
+echo.
+
 where npm >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] npm no esta disponible en este sistema.

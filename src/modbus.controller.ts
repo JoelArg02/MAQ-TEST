@@ -128,13 +128,13 @@ export class ModbusController {
   @Post('full-reset')
   async fullReset() {
     try {
-      const plcResult = await this.modbus.resetAllPulsos();
+      const plcResult = await this.modbus.resetAllForFullReset();
       const dbResult = await this.storage.clearAllData();
       await this.storage.markEvent('FULL_RESET', JSON.stringify({ plcResult, dbResult }));
       await this.logger.captureNow({ ensure: true });
       return {
         ok: true,
-        message: 'Reset completo: PLC (D1000-D1061 en bloque) y base de datos limpiados.',
+        message: 'Reset completo: PLC (D1000-D1061 y D1100-D1121 en bloque) y base de datos limpiados.',
         plc: plcResult,
         db: dbResult,
       };
