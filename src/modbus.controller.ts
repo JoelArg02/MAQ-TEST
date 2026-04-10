@@ -134,7 +134,7 @@ export class ModbusController {
       await this.logger.captureNow();
       return {
         ok: true,
-        message: 'Reset completo: PLC (D1000-D1060) y base de datos limpiados.',
+        message: 'Reset completo: PLC (D1000-D1061 en bloque) y base de datos limpiados.',
         plc: plcResult,
         db: dbResult,
       };

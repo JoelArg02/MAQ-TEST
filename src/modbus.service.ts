@@ -176,15 +176,22 @@ export class ModbusService {
 
   async resetAllPulsos() {
     return this.runQueued(async () => {
-      for (const target of Object.values(PULSOS)) {
-        const payload = this.encodeUInt32WordSwap(0);
-        await this.withReconnect(() => this.client.writeRegisters(target.address, payload));
-      }
+      const targets = Object.values(PULSOS).sort((a, b) => a.address - b.address);
+      const firstAddress = targets[0].address;
+      const lastAddress = targets[targets.length - 1].address + 1;
+      const totalRegisters = lastAddress - firstAddress + 1;
+
+      // Un solo paquete FC16 para resetear todo el bloque en el mismo ciclo de escritura.
+      const payload = new Array<number>(totalRegisters).fill(0);
+      await this.withReconnect(() => this.client.writeRegisters(firstAddress, payload));
 
       return {
         ok: true,
-        message: 'Pulsos 1000-1060 reseteados a 0.',
-        resetAddresses: Object.values(PULSOS).map((x) => x.address),
+        message: `Pulsos D${firstAddress}-D${lastAddress} reseteados a 0 en bloque.`,
+        resetAddresses: targets.map((x) => x.address),
+        blockStartAddress: firstAddress,
+        blockEndAddress: lastAddress,
+        totalRegisters,
       };
     });
   }

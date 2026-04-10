@@ -1,2 +1,4 @@
 **/node_modules/**
-modbus_history.db
+*.db
+*.db-shm
+*.db-wal
